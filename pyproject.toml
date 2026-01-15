@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "quanta-lang"
+version = "0.1.0"
+description = "Quanta: A high-level language that compiles to OpenQASM 3"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Quanta Language Contributors", email = "quanta@example.com" }
+]
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Compilers",
+]
+
+dependencies = [
+  "qiskit>=1.0",
+  "qiskit-qasm3-import>=0.6.0",
+  "lark>=1.1.9",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0",
+  "pytest-cov>=4.0",
+  "black>=23.0",
+  "ruff>=0.1.0",
+]
+
+[project.scripts]
+quanta = "quanta.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/quanta-lang/quanta"
+Documentation = "https://github.com/quanta-lang/quanta/docs"
+Repository = "https://github.com/quanta-lang/quanta"
+Issues = "https://github.com/quanta-lang/quanta/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
