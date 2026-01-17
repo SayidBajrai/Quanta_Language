@@ -29,7 +29,6 @@ GATE_MAP: Dict[str, str] = {
     "RY": "ry",
     "RX": "rx",
     "Measure": "measure",
-    "MEASURE": "measure",
 }
 
 
@@ -131,7 +130,7 @@ class QASM3Generator(Visitor):
             name = node.callee.name
             
             # Handle standard library functions
-            if name == "measure_all":
+            if name == "MeasureAll":
                 self._handle_measure_all(node.args)
                 return
             elif name == "print":
@@ -214,6 +213,14 @@ class QASM3Generator(Visitor):
     
     def visit_var_expr(self, node: VarExpr) -> str:
         """Variable reference"""
+        # Handle built-in constants
+        import math
+        builtin_constants = {
+            "pi": str(math.pi),
+            "e": str(math.e),
+        }
+        if node.name in builtin_constants:
+            return builtin_constants[node.name]
         return node.name
     
     def visit_literal_expr(self, node: LiteralExpr) -> str:
@@ -241,29 +248,63 @@ class QASM3Generator(Visitor):
             return result
         return str(result)
     
+    def _substitute_params(self, expr: Expr, param_map: Dict[str, Expr]) -> Expr:
+        """Recursively substitute parameter names with argument expressions"""
+        if isinstance(expr, VarExpr):
+            # If this is a parameter, substitute it
+            if expr.name in param_map:
+                return param_map[expr.name]
+            return expr
+        elif isinstance(expr, CallExpr):
+            # Recursively substitute in call arguments
+            new_args = [self._substitute_params(arg, param_map) for arg in expr.args]
+            # Create new CallExpr with substituted args
+            new_call = CallExpr(expr.callee, new_args)
+            new_call.modifiers = expr.modifiers
+            new_call.ctrl_count = expr.ctrl_count
+            return new_call
+        elif isinstance(expr, IndexExpr):
+            # Substitute in base and index
+            new_base = self._substitute_params(expr.base, param_map)
+            new_index = self._substitute_params(expr.index, param_map)
+            return IndexExpr(new_base, new_index)
+        elif isinstance(expr, BinaryExpr):
+            new_left = self._substitute_params(expr.left, param_map)
+            new_right = self._substitute_params(expr.right, param_map)
+            return BinaryExpr(new_left, expr.op, new_right)
+        elif isinstance(expr, UnaryExpr):
+            new_right = self._substitute_params(expr.right, param_map)
+            return UnaryExpr(expr.op, new_right)
+        elif isinstance(expr, GroupExpr):
+            new_expr = self._substitute_params(expr.expr, param_map)
+            return GroupExpr(new_expr)
+        else:
+            # LiteralExpr, ListExpr, etc. - no substitution needed
+            return expr
+    
     def _expand_gate_macro(self, name: str, args: List[Expr], modifiers: List[str], ctrl_count: Optional[int]):
         """Expand a gate macro inline"""
         gate = self.gates[name]
-        # Create parameter substitution map
+        # Create parameter substitution map (param name -> argument Expr)
         param_map = {}
         for i, param in enumerate(gate.params):
             if i < len(args):
-                param_map[param] = self._expr_to_qasm(args[i])
+                param_map[param] = args[i]
         
         # Expand gate body with parameter substitution
         for stmt in gate.body:
-            # For now, simple expansion - in a full implementation,
-            # we'd need to substitute parameters in the AST
             if isinstance(stmt, ExprStmt) and isinstance(stmt.expr, CallExpr):
+                # Substitute parameters in the call expression
+                substituted_expr = self._substitute_params(stmt.expr, param_map)
                 # Apply modifiers to the call if present
                 if modifiers:
-                    stmt.expr.modifiers = modifiers
-                    stmt.expr.ctrl_count = ctrl_count
+                    substituted_expr.modifiers = modifiers
+                    substituted_expr.ctrl_count = ctrl_count
                 # Recursively handle calls in gate body
-                self.visit_call_expr(stmt.expr)
+                self.visit_call_expr(substituted_expr)
     
     def _handle_measure_all(self, args: List[Expr]):
-        """Handle measure_all(q, c) stdlib function"""
+        """Handle MeasureAll(q, c) stdlib function"""
         if len(args) != 2:
             return
         q_reg = self._expr_to_qasm(args[0])

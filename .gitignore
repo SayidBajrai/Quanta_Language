@@ -56,3 +56,4 @@ dist/
 *.qasm
 *.qta
 .quanta_cache/
+ignore/

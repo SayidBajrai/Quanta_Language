@@ -28,6 +28,13 @@ class Parser:
         
         statements = []
         while not self._is_at_end():
+            # Skip NEWLINE tokens
+            while self._check(TokenType.NEWLINE):
+                self._advance()
+            
+            if self._is_at_end():
+                break
+                
             stmt = self._parse_statement()
             if stmt:
                 statements.append(stmt)
@@ -36,6 +43,14 @@ class Parser:
     
     def _parse_statement(self) -> Optional[Stmt]:
         """Parse a statement"""
+        # Skip NEWLINE tokens
+        while self._match(TokenType.NEWLINE):
+            pass
+        
+        # If we encounter a closing brace, return None to signal end of block
+        if self._check(TokenType.RBRACE):
+            return None
+        
         if self._match(TokenType.FUNC):
             return self._parse_function()
         elif self._match(TokenType.GATE):
@@ -239,6 +254,9 @@ class Parser:
     
     def _parse_expression(self) -> Expr:
         """Parse an expression"""
+        # Skip NEWLINE tokens before expressions
+        while self._check(TokenType.NEWLINE):
+            self._advance()
         return self._parse_assignment()
     
     def _parse_assignment(self) -> Expr:
@@ -364,6 +382,9 @@ class Parser:
     
     def _parse_primary(self) -> Expr:
         """Parse primary expression"""
+        # Skip NEWLINE tokens before primary expressions
+        while self._check(TokenType.NEWLINE):
+            self._advance()
         if self._match(TokenType.NUMBER):
             return LiteralExpr(self._previous().value)
         if self._match(TokenType.STRING):

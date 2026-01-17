@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quanta-lang"
-version = "0.1.0"
+version = "0.1.6"
 description = "Quanta: A high-level language that compiles to OpenQASM 3"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -57,4 +57,4 @@ target-version = ['py310']
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "0.1.6"

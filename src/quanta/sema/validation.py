@@ -2,7 +2,7 @@
 Semantic analyzer for Quanta
 """
 
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 from ..ast.nodes import (
     Program, Stmt, Expr,
     VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
@@ -30,6 +30,12 @@ class SemanticAnalyzer:
         self.functions: Dict[str, FuncDecl] = {}
         self.gates: Dict[str, GateDecl] = {}
         self.constants: Dict[str, ConstDecl] = {}
+        # Built-in constants
+        import math
+        self.builtin_constants = {
+            "pi": math.pi,
+            "e": math.e,
+        }
     
     def analyze(self, ast: Program):
         """Perform semantic analysis on program"""
@@ -85,16 +91,42 @@ class SemanticAnalyzer:
     
     def _validate_gate(self, gate: GateDecl):
         """Validate gate declaration"""
-        # Gates cannot return values
+        # Add gate parameters to symbol table (as qubit parameters)
+        saved_symbols = {}
+        for param in gate.params:
+            # Gate parameters are qubit/bit references
+            saved_symbols[param] = self.symbols.get(param)
+            self.symbols[param] = Symbol(param, "qubit")
+        
+        # Validate gate body with parameters in scope
         for stmt in gate.body:
             self._validate_statement(stmt)
+        
+        # Restore symbol table
+        for param in gate.params:
+            if saved_symbols[param] is None:
+                del self.symbols[param]
+            else:
+                self.symbols[param] = saved_symbols[param]
     
     def _validate_for(self, stmt: ForStmt):
         """Validate for loop"""
         # Iterable must be compile-time evaluable
         self._validate_expression(stmt.iterable)
+        
+        # Add iterator variable to symbol table
+        saved_iterator = self.symbols.get(stmt.iterator)
+        self.symbols[stmt.iterator] = Symbol(stmt.iterator, "int")
+        
+        # Validate loop body with iterator in scope
         for body_stmt in stmt.body:
             self._validate_statement(body_stmt)
+        
+        # Restore symbol table
+        if saved_iterator is None:
+            del self.symbols[stmt.iterator]
+        else:
+            self.symbols[stmt.iterator] = saved_iterator
     
     def _validate_if(self, stmt: IfStmt):
         """Validate if statement"""
@@ -116,7 +148,10 @@ class SemanticAnalyzer:
         elif isinstance(expr, UnaryExpr):
             self._validate_expression(expr.right)
         elif isinstance(expr, VarExpr):
-            if expr.name not in self.symbols and expr.name not in self.functions:
+            if (expr.name not in self.symbols and 
+                expr.name not in self.functions and 
+                expr.name not in self.gates and
+                expr.name not in self.builtin_constants):
                 raise QuantaSemanticError(f"Undefined variable or function: {expr.name}")
         elif isinstance(expr, ListExpr):
             for elem in expr.elements:
@@ -132,7 +167,7 @@ class SemanticAnalyzer:
         if "ctrl" in expr.modifiers or "inv" in expr.modifiers:
             if isinstance(expr.callee, VarExpr):
                 name = expr.callee.name
-                if name == "Measure" or name == "MEASURE":
+                if name == "Measure":
                     raise QuantaSemanticError("Modifiers (ctrl/inv) are not allowed on Measure")
         
         if isinstance(expr.callee, VarExpr):

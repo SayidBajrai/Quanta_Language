@@ -200,9 +200,9 @@ class Lexer:
         elif char == '"':
             return self._string()
         elif char.isdigit():
-            return self._number()
+            return self._number(char)
         elif char.isalpha() or char == "_":
-            return self._identifier()
+            return self._identifier(char)
         
         return None
     
@@ -225,11 +225,11 @@ class Lexer:
         self._advance()  # Consume closing quote
         return Token(TokenType.STRING, value, start_line, start_col)
     
-    def _number(self) -> Token:
+    def _number(self, first_char: str = "") -> Token:
         """Scan a number literal"""
         start_line = self.line
         start_col = self.column - 1
-        value = ""
+        value = first_char  # Include the first character that was already advanced
         
         while self._peek().isdigit():
             value += self._advance()
@@ -241,11 +241,11 @@ class Lexer:
         
         return Token(TokenType.NUMBER, value, start_line, start_col)
     
-    def _identifier(self) -> Token:
+    def _identifier(self, first_char: str = "") -> Token:
         """Scan an identifier or keyword"""
         start_line = self.line
         start_col = self.column - 1
-        value = ""
+        value = first_char  # Include the first character that was already advanced
         
         while self._peek().isalnum() or self._peek() == "_":
             value += self._advance()
