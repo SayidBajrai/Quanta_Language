@@ -172,6 +172,42 @@ class SemanticAnalyzer:
         
         if isinstance(expr.callee, VarExpr):
             name = expr.callee.name
+            
+            # Validate quantum arithmetic operations
+            if name == "QAdd":
+                self._validate_qadd(expr)
+                return
+            elif name == "QFTAdd":
+                self._validate_qftadd(expr)
+                return
+            elif name == "QTreeAdd":
+                self._validate_qtreeadd(expr)
+                return
+            elif name == "QMult":
+                self._validate_qmult(expr)
+                return
+            elif name == "QExpEncMult":
+                self._validate_qexpencmult(expr)
+                return
+            elif name == "QTreeMult":
+                self._validate_qtreemult(expr)
+                return
+            elif name == "QSub":
+                self._validate_qsub(expr)
+                return
+            elif name == "QDiv":
+                self._validate_qdiv(expr)
+                return
+            elif name == "QMod":
+                self._validate_qmod(expr)
+                return
+            elif name == "Compare":
+                self._validate_compare(expr)
+                return
+            elif name == "Grover":
+                self._validate_grover(expr)
+                return
+            
             if name in self.gates:
                 # Gate call - validate arguments match
                 gate = self.gates[name]
@@ -212,3 +248,112 @@ class SemanticAnalyzer:
                 int(expr.index.value)
             except (ValueError, TypeError):
                 raise QuantaTypeError("Quantum register index must be a compile-time integer")
+    
+    def _validate_qadd(self, expr: CallExpr):
+        """Validate QAdd operation"""
+        if len(expr.args) < 2:
+            raise QuantaSemanticError("QAdd requires at least 2 arguments (inputs and destination)")
+        
+        # All arguments should be qint types
+        for arg in expr.args:
+            self._validate_expression(arg)
+            # TODO: Check that all args are qint types with matching widths
+    
+    def _validate_qmult(self, expr: CallExpr):
+        """Validate QMult operation"""
+        if len(expr.args) < 3:
+            raise QuantaSemanticError("QMult requires at least 3 arguments (inputs and destination)")
+        
+        # All arguments should be qint types
+        for arg in expr.args:
+            self._validate_expression(arg)
+            # TODO: Check that output width >= sum of input widths
+    
+    def _validate_compare(self, expr: CallExpr):
+        """Validate Compare operation"""
+        if len(expr.args) != 3:
+            raise QuantaSemanticError("Compare requires exactly 3 arguments: Compare(a, b, flag)")
+        
+        for arg in expr.args:
+            self._validate_expression(arg)
+        # TODO: Check that flag is qint[1] or qubit
+    
+    def _validate_qftadd(self, expr: CallExpr):
+        """Validate QFTAdd operation"""
+        if len(expr.args) < 2:
+            raise QuantaSemanticError("QFTAdd requires at least 2 arguments (inputs and destination)")
+        
+        # All arguments should be qint types
+        for arg in expr.args:
+            self._validate_expression(arg)
+            # TODO: Check that all args are qint types with matching widths
+    
+    def _validate_qtreeadd(self, expr: CallExpr):
+        """Validate QTreeAdd operation"""
+        if len(expr.args) < 2:
+            raise QuantaSemanticError("QTreeAdd requires at least 2 arguments (inputs and destination)")
+        
+        # All arguments should be qint types
+        for arg in expr.args:
+            self._validate_expression(arg)
+            # TODO: Check that all args are qint types with matching widths
+    
+    def _validate_qexpencmult(self, expr: CallExpr):
+        """Validate QExpEncMult operation"""
+        if len(expr.args) < 3:
+            raise QuantaSemanticError("QExpEncMult requires at least 3 arguments (inputs and destination)")
+        
+        # All arguments should be qint types
+        for arg in expr.args:
+            self._validate_expression(arg)
+            # TODO: Check that output width >= sum of input widths
+    
+    def _validate_qtreemult(self, expr: CallExpr):
+        """Validate QTreeMult operation"""
+        if len(expr.args) < 3:
+            raise QuantaSemanticError("QTreeMult requires at least 3 arguments (inputs and destination)")
+        
+        # All arguments should be qint types
+        for arg in expr.args:
+            self._validate_expression(arg)
+            # TODO: Check that output width >= sum of input widths
+    
+    def _validate_qsub(self, expr: CallExpr):
+        """Validate QSub operation"""
+        if len(expr.args) < 2:
+            raise QuantaSemanticError("QSub requires at least 2 arguments (inputs and destination)")
+        
+        # All arguments should be qint types
+        for arg in expr.args:
+            self._validate_expression(arg)
+            # TODO: Check that all args are qint types with matching widths
+    
+    def _validate_qdiv(self, expr: CallExpr):
+        """Validate QDiv operation"""
+        if len(expr.args) != 4:
+            raise QuantaSemanticError("QDiv requires exactly 4 arguments: QDiv(dividend, divisor, quotient, remainder)")
+        
+        # All arguments should be qint types
+        for arg in expr.args:
+            self._validate_expression(arg)
+        # TODO: Check that divisor is not zero (compile-time check if possible)
+        # TODO: Check that quotient and remainder have same width as dividend
+    
+    def _validate_qmod(self, expr: CallExpr):
+        """Validate QMod operation"""
+        if len(expr.args) < 3:
+            raise QuantaSemanticError("QMod requires at least 3 arguments: QMod(a, b, result)")
+        
+        # All arguments should be qint types
+        for arg in expr.args:
+            self._validate_expression(arg)
+            # TODO: Check that all args are qint types with matching widths
+    
+    def _validate_grover(self, expr: CallExpr):
+        """Validate Grover operation"""
+        if len(expr.args) != 2:
+            raise QuantaSemanticError("Grover requires exactly 2 arguments: Grover(a, target)")
+        
+        for arg in expr.args:
+            self._validate_expression(arg)
+        # TODO: Check that target is classical (int or bint)

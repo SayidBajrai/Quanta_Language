@@ -5,6 +5,7 @@ Main compiler pipeline
 from .lexer.lexer import Lexer
 from .parser.parser import Parser
 from .sema.validation import SemanticAnalyzer
+from .sema.transform import ASTTransformer
 from .lower.qasm3 import QASM3Generator
 from .errors import QuantaError, QuantaCompilationError
 
@@ -15,6 +16,7 @@ class Compiler:
     def __init__(self):
         self.lexer = Lexer()
         self.parser = Parser()
+        self.transformer = ASTTransformer()
         self.semantic_analyzer = SemanticAnalyzer()
         self.codegen = QASM3Generator()
     
@@ -25,8 +27,9 @@ class Compiler:
         Pipeline:
         1. Lexical analysis
         2. Parsing
-        3. Semantic analysis
-        4. Code generation
+        3. AST transformation (operator overloading, etc.)
+        4. Semantic analysis
+        5. Code generation
         """
         try:
             # Lexical analysis
@@ -34,6 +37,9 @@ class Compiler:
             
             # Parsing
             ast = self.parser.parse(tokens)
+            
+            # AST transformation (desugaring operator overloading)
+            ast = self.transformer.transform(ast)
             
             # Semantic analysis
             self.semantic_analyzer.analyze(ast)

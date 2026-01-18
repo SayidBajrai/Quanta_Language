@@ -34,6 +34,8 @@ class TokenType(Enum):
     STR = "STR"
     LIST = "LIST"
     DICT = "DICT"
+    QINT = "QINT"
+    BINT = "BINT"
     
     # Literals
     IDENT = "IDENT"
@@ -55,6 +57,7 @@ class TokenType(Enum):
     MINUS = "-"
     STAR = "*"
     SLASH = "/"
+    PERCENT = "%"
     
     # Delimiters
     LBRACE = "{"
@@ -93,6 +96,8 @@ class Lexer:
         "gate": TokenType.GATE,
         "qubit": TokenType.QUBIT,
         "bit": TokenType.BIT,
+        "qint": TokenType.QINT,
+        "bint": TokenType.BINT,
         "for": TokenType.FOR,
         "if": TokenType.IF,
         "else": TokenType.ELSE,
@@ -174,6 +179,8 @@ class Lexer:
             return self._make_token(TokenType.STAR, "*")
         elif char == "/":
             return self._make_token(TokenType.SLASH, "/")
+        elif char == "%":
+            return self._make_token(TokenType.PERCENT, "%")
         elif char == "=":
             if self._match("="):
                 return self._make_token(TokenType.EQEQ, "==")

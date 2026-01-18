@@ -54,12 +54,13 @@ class LetDecl(Stmt):
 
 
 class QuantumDecl(Stmt):
-    """Quantum register declaration (qubit/bit)"""
+    """Quantum register declaration (qubit/bit/qint/bint)"""
     
-    def __init__(self, kind: str, size: Optional[int], name: str):
-        self.kind = kind  # "qubit" or "bit"
+    def __init__(self, kind: str, size: Optional[int], name: str, value: Optional[Expr] = None):
+        self.kind = kind  # "qubit", "bit", "qint", or "bint"
         self.size = size
         self.name = name
+        self.value = value  # Initialization value (e.g., qint[3] x = 2)
 
 
 class FuncDecl(Stmt):

@@ -63,7 +63,7 @@ class Parser:
             return self._parse_const_decl()
         elif self._match(TokenType.LET):
             return self._parse_let_decl()
-        elif self._check(TokenType.QUBIT) or self._check(TokenType.BIT):
+        elif self._check(TokenType.QUBIT) or self._check(TokenType.BIT) or self._check(TokenType.QINT) or self._check(TokenType.BINT):
             return self._parse_quantum_decl()
         elif self._match(TokenType.FOR):
             return self._parse_for()
@@ -187,19 +187,38 @@ class Parser:
     def _parse_quantum_decl(self) -> QuantumDecl:
         """Parse quantum register declaration"""
         kind_token = self._advance()
-        kind = "qubit" if kind_token.type == TokenType.QUBIT else "bit"
+        if kind_token.type == TokenType.QUBIT:
+            kind = "qubit"
+        elif kind_token.type == TokenType.BIT:
+            kind = "bit"
+        elif kind_token.type == TokenType.QINT:
+            kind = "qint"
+        elif kind_token.type == TokenType.BINT:
+            kind = "bint"
+        else:
+            kind = "qubit"  # Default
         
         size = None
         if self._match(TokenType.LBRACKET):
             size_expr = self._parse_expression()
-            if isinstance(size_expr, LiteralExpr) and size_expr.value.isdigit():
-                size = int(size_expr.value)
+            if isinstance(size_expr, LiteralExpr):
+                try:
+                    size = int(size_expr.value)
+                except (ValueError, TypeError):
+                    pass
             self._consume(TokenType.RBRACKET, "Expected ']' after size")
         
+        # Parse the name first
         name = self._consume(TokenType.IDENT, "Expected register name").value
+        
+        # Check for initialization value after the name
+        value = None
+        if self._match(TokenType.EQ):
+            value = self._parse_expression()
+        
         self._match(TokenType.SEMICOLON)  # Optional semicolon
         
-        return QuantumDecl(kind, size, name)
+        return QuantumDecl(kind, size, name, value)
     
     def _parse_for(self) -> ForStmt:
         """Parse for loop"""
@@ -319,7 +338,7 @@ class Parser:
     def _parse_factor(self) -> Expr:
         """Parse multiplication/division"""
         expr = self._parse_unary()
-        while self._match(TokenType.STAR, TokenType.SLASH):
+        while self._match(TokenType.STAR, TokenType.SLASH, TokenType.PERCENT):
             op = self._previous().value
             right = self._parse_unary()
             expr = BinaryExpr(expr, op, right)
@@ -441,7 +460,8 @@ class Parser:
     def _check_type(self) -> bool:
         """Check if current token is a type"""
         return self._check(TokenType.INT, TokenType.FLOAT, TokenType.BOOL, TokenType.STR, 
-                          TokenType.LIST, TokenType.DICT, TokenType.VAR)
+                          TokenType.LIST, TokenType.DICT, TokenType.VAR, TokenType.QINT, TokenType.BINT,
+                          TokenType.QUBIT, TokenType.BIT)
     
     def _match(self, *types: TokenType) -> bool:
         """Match and consume if any type matches"""
