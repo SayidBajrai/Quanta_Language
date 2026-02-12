@@ -114,7 +114,7 @@ echo ========================================
 echo.
 
 REM Retry loop
-set MAX_RETRIES=3
+set MAX_RETRIES=0
 set RETRY_COUNT=0
 
 :retry_upload
@@ -124,7 +124,7 @@ echo Attempt %RETRY_COUNT% of %MAX_RETRIES%...
 REM Upload using twine with API token and --skip-existing to handle existing files
 echo Uploading to %REPO_NAME%...
 REM Use Python script to pass token to twine to avoid batch expansion issues with special characters
-python upload_with_token.py %REPO_URL% > upload_output.txt 2>&1
+python ignore\upload_with_token.py %REPO_URL% > upload_output.txt 2>&1
 set UPLOAD_ERROR=!errorlevel!
 
 REM Check output for specific error messages

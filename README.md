@@ -9,6 +9,7 @@
 - 🔒 **Static analysis** - Compile-time safety checks
 - 🎯 **OpenQASM 3 output** - Direct compilation to standard QASM
 - 🚀 **Qiskit integration** - Seamless execution with Qiskit backends
+- 🖥️ **Frontend debug** - `get_prints(source)` runs a statevector sim and returns all `Print()` output (simulator only)
 
 ## Installation
 
@@ -16,12 +17,14 @@
 pip install quanta-lang
 ```
 
+Requires Python 3.10+ and Qiskit.
+
 ## Quick Start
 
 ### As a Library
 
 ```python
-from quanta import compile, run
+from quanta import compile, run, get_prints
 
 # Compile Quanta source to OpenQASM 3
 source = """
@@ -40,9 +43,14 @@ MeasureAll(q, c)
 qasm = compile(source)
 print(qasm)
 
-# Run and get results
+# Run and get measurement results
 result = run(source, shots=1024)
 print(result)
+
+# Frontend debug: capture Print() output (statevector simulator only)
+debug_source = "qubit q\nH(q)\nprint(q)"
+terminal = get_prints(debug_source)
+print(terminal)  # e.g. "1/sqrt(2) * |0> + 1/sqrt(2) * |1>"
 ```
 
 ### CLI Usage
@@ -96,14 +104,16 @@ measure q[1] -> c[1];
 
 ## Language Features
 
-- **Types**: `int`, `float`, `bool`, `str`, `list`, `dict`, `qubit`, `bit`
+- **Types**: `int`, `float`, `bool`, `str`, `list`, `dict`, `qubit`, `bit`, `qint[n]`, `bint[n]`
 - **Gate Macros**: `gate` keyword for compile-time circuit composition
-- **Modifiers**: `ctrl` and `inv` (dagger) modifiers for gates, and `reset` modifiers for qubits
+- **Modifiers**: `ctrl` and `inv` (dagger) modifiers for gates, and `reset` for qubits
 - **Functions**: Compile-time inlined for quantum operations
 - **Control Flow**: `for` loops (unrolled), `if/else` (classical only)
 - **Gate Set**: `H`, `X`, `CNot`, `CZ`, `Swap`, `RZ`, `Measure`, and more
+- **Quantum Arithmetic**: `QAdd`, `QMult`, `Compare`, `Grover`; operator overloading `+` and `*` on `qint`
 - **Standard Library**: `Print()`, `Len()`, `MeasureAll()`, `Assert()`, `Range()`
-- **Constants**: Built-in constants like `pi`, `e`, and user-defined `const` declarations
+- **Constants**: Built-in `pi`, `e`, and user-defined `const` declarations
+- **API**: `compile(source)`, `run(source, shots=...)`, `get_prints(source)` (frontend debug, simulator only)
 
 ## Quanta Language Specification
 
@@ -913,6 +923,28 @@ Print(q)      // |ψ⟩ (symbolic)
 
 📌 No amplitudes unless simulator supports it.
 
+#### `get_prints(quanta_code)` – Frontend debug execution (Python API)
+
+**Frontend Debug Execution Only. Not compatible with hardware backend.**
+
+Parses Quanta source, runs it in a statevector simulator, and returns the string that would be printed by all `Print()` / `print()` calls.
+
+- **Classical**: `print(c)` appends the value of `c` (e.g. `[0, 1]` for a bit register).
+- **Quantum**: `print(q)` appends a symbolic state summary (e.g. `1/sqrt(2) * |0> + 1/sqrt(2) * |1>`). No state collapse.
+- **Entangled subsystems**: If you print a register that is entangled with others, the full state is shown with a note: `Subsystem entangled. 1/sqrt(2) * |00> + 1/sqrt(2) * |11>`.
+
+```python
+from quanta import get_prints
+terminal = get_prints("""
+qubit q
+H(q)
+print(q)
+""")
+# terminal == "1/sqrt(2) * |0> + 1/sqrt(2) * |1>"
+```
+
+**Limits:** Raises `RuntimeError` if total qubits > 20 (statevector uses 2^n memory).
+
 #### Other Core Helpers
 
 ```quanta
@@ -1140,15 +1172,18 @@ var x = 1; var y = 2
 ## Development
 
 ```bash
-# Install in development mode
+# Install in development mode (from project root)
 pip install -e .[dev]
 
-# Run tests
+# Run the test suite
+python ignore/test.py
+
+# Or use pytest if configured
 pytest
 
-# Format code
-black src tests
-ruff check src tests
+# Format and lint
+black src
+ruff check src
 ```
 
 ## License

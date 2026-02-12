@@ -2,7 +2,7 @@
 Quanta Language - A high-level language that compiles to OpenQASM 3
 """
 
-from .api import compile, run
+from .api import compile, run, get_prints
 
 __version__ = "0.1.0"
-__all__ = ["compile", "run"]
+__all__ = ["compile", "run", "get_prints"]
