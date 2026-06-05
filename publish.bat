@@ -114,7 +114,7 @@ echo ========================================
 echo.
 
 REM Retry loop
-set MAX_RETRIES=0
+set MAX_RETRIES=1
 set RETRY_COUNT=0
 
 :retry_upload

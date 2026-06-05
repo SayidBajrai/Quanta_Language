@@ -7,7 +7,7 @@ from ..ast.nodes import (
     Program, Stmt, Expr,
     VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
     ForStmt, IfStmt, ReturnStmt, ExprStmt,
-    CallExpr, IndexExpr, BinaryExpr, UnaryExpr,
+    CallExpr, IndexExpr, SliceExpr, BinaryExpr, UnaryExpr,
     VarExpr, LiteralExpr, ListExpr, GroupExpr, AssignExpr,
 )
 from ..errors import QuantaSemanticError, QuantaTypeError
@@ -42,7 +42,10 @@ class SemanticAnalyzer:
         # First pass: collect declarations
         for stmt in ast.statements:
             if isinstance(stmt, QuantumDecl):
-                self.symbols[stmt.name] = Symbol(stmt.name, f"{stmt.kind}[{stmt.size or 1}]")
+                if stmt.size2 is not None:
+                    self.symbols[stmt.name] = Symbol(stmt.name, f"{stmt.kind}[{stmt.size or 0},{stmt.size2}]")
+                else:
+                    self.symbols[stmt.name] = Symbol(stmt.name, f"{stmt.kind}[{stmt.size or 1}]")
             elif isinstance(stmt, FuncDecl):
                 self.functions[stmt.name] = stmt
             elif isinstance(stmt, GateDecl):
@@ -142,6 +145,8 @@ class SemanticAnalyzer:
             self._validate_call(expr)
         elif isinstance(expr, IndexExpr):
             self._validate_index(expr)
+        elif isinstance(expr, SliceExpr):
+            self._validate_slice(expr)
         elif isinstance(expr, BinaryExpr):
             self._validate_expression(expr.left)
             self._validate_expression(expr.right)
@@ -207,6 +212,24 @@ class SemanticAnalyzer:
             elif name == "Grover":
                 self._validate_grover(expr)
                 return
+            elif name == "Bell":
+                self._validate_bell(expr)
+                return
+            elif name == "GHZ":
+                self._validate_ghz(expr)
+                return
+            elif name == "WState":
+                self._validate_wstate(expr)
+                return
+            elif name == "SwapGate":
+                self._validate_swapgate(expr)
+                return
+            elif name == "QFT":
+                self._validate_qft(expr)
+                return
+            elif name == "InverseQFT":
+                self._validate_inverse_qft(expr)
+                return
             
             if name in self.gates:
                 # Gate call - validate arguments match
@@ -248,7 +271,17 @@ class SemanticAnalyzer:
                 int(expr.index.value)
             except (ValueError, TypeError):
                 raise QuantaTypeError("Quantum register index must be a compile-time integer")
-    
+
+    def _validate_slice(self, expr: SliceExpr):
+        """Validate slice expression (e.g. q[1:4])"""
+        self._validate_expression(expr.base)
+        self._validate_expression(expr.start)
+        self._validate_expression(expr.end)
+        if expr.step is not None:
+            self._validate_expression(expr.step)
+        # Start/end/step should be compile-time evaluable (literal or simple expr)
+        # We don't require LiteralExpr here; codegen will evaluate or fail
+
     def _validate_qadd(self, expr: CallExpr):
         """Validate QAdd operation"""
         if len(expr.args) < 2:
@@ -357,3 +390,51 @@ class SemanticAnalyzer:
         for arg in expr.args:
             self._validate_expression(arg)
         # TODO: Check that target is classical (int or bint)
+    
+    def _validate_bell(self, expr: CallExpr):
+        """Validate Bell gate operation (2 qubits: explicit, or whole register/slice)"""
+        if len(expr.args) < 1 or len(expr.args) > 2:
+            raise QuantaSemanticError("Bell requires 1 or 2 arguments: Bell(q0, q1) or Bell(q[0:2])")
+        
+        for arg in expr.args:
+            self._validate_expression(arg)
+    
+    def _validate_ghz(self, expr: CallExpr):
+        """Validate GHZ gate operation (whole register, slice, or explicit qubits)"""
+        if len(expr.args) < 1:
+            raise QuantaSemanticError("GHZ requires at least 1 argument: GHZ(q) or GHZ(q[0], q[1], ...)")
+        
+        for arg in expr.args:
+            self._validate_expression(arg)
+    
+    def _validate_wstate(self, expr: CallExpr):
+        """Validate WState gate operation (3 qubits: explicit or slice)"""
+        if len(expr.args) < 1 or len(expr.args) > 3:
+            raise QuantaSemanticError("WState requires 1 or 3 arguments: WState(q[0:3]) or WState(q0, q1, q2)")
+        
+        for arg in expr.args:
+            self._validate_expression(arg)
+    
+    def _validate_swapgate(self, expr: CallExpr):
+        """Validate SwapGate operation"""
+        if len(expr.args) != 2:
+            raise QuantaSemanticError("SwapGate requires exactly 2 arguments: SwapGate(a, b)")
+        
+        for arg in expr.args:
+            self._validate_expression(arg)
+    
+    def _validate_qft(self, expr: CallExpr):
+        """Validate QFT gate operation (whole register, slice, or explicit qubits)"""
+        if len(expr.args) < 1:
+            raise QuantaSemanticError("QFT requires at least 1 argument: QFT(q) or QFT(q[0], q[1], ...)")
+        
+        for arg in expr.args:
+            self._validate_expression(arg)
+    
+    def _validate_inverse_qft(self, expr: CallExpr):
+        """Validate InverseQFT gate operation (whole register, slice, or explicit qubits)"""
+        if len(expr.args) < 1:
+            raise QuantaSemanticError("InverseQFT requires at least 1 argument: InverseQFT(q) or InverseQFT(q[0], ...)")
+        
+        for arg in expr.args:
+            self._validate_expression(arg)

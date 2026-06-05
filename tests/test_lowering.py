@@ -41,12 +41,12 @@ X(q[0]);
     assert "x q[0]" in qasm.lower()
 
 
-def test_measure_all():
-    """Test MeasureAll() function (case-sensitive)"""
+def test_measure_registers():
+    """Test Measure(q, c) with full registers"""
     source = """
-qubit[2] q;
-bit[2] c;
-MeasureAll(q, c);
+qubit[2] q
+bit[2] c
+Measure(q, c)
 """
     qasm = compile(source)
     

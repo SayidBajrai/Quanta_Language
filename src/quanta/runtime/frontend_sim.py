@@ -178,10 +178,15 @@ def get_prints(quanta_code: str) -> str:
     global_qubit = 0
     for stmt in ast.statements:
         if isinstance(stmt, QuantumDecl):
-            size = stmt.size or 1
+            if stmt.kind == "qdec" and stmt.size is not None and stmt.size2 is not None:
+                size = stmt.size + stmt.size2
+            elif stmt.kind == "qfloat" and stmt.size is not None and stmt.size2 is not None:
+                size = 1 + stmt.size + stmt.size2
+            else:
+                size = stmt.size or 1
             reg_sizes[stmt.name] = size
             reg_kind[stmt.name] = stmt.kind
-            if stmt.kind in ("qubit", "qint"):
+            if stmt.kind in ("qubit", "qint", "qdec", "qfloat"):
                 for i in range(size):
                     qubit_map[(stmt.name, i)] = global_qubit
                     global_qubit += 1
@@ -256,7 +261,7 @@ def get_prints(quanta_code: str) -> str:
         qubits = []
         params = []
         for a in args:
-            if isinstance(a, VarExpr) and reg_kind.get(a.name, "") in ("qubit", "qint"):
+            if isinstance(a, VarExpr) and reg_kind.get(a.name, "") in ("qubit", "qint", "qdec", "qfloat"):
                 # Full register: all indices
                 sz = reg_sizes.get(a.name, 1)
                 qubits.extend([qubit_map[(a.name, i)] for i in range(sz)])
@@ -402,10 +407,25 @@ def get_prints(quanta_code: str) -> str:
                     output_lines.append(str(v))
                     return
                 if name == "Measure" and len(expr.args) == 2:
-                    # Measure qubit -> classical bit
+                    # Measure qubit(s) -> classical bit(s): single Measure(q[i], c[i]) or full register Measure(q, c)
                     qarg, carg = expr.args[0], expr.args[1]
-                    qkey = None
-                    ckey = None
+                    if isinstance(qarg, VarExpr) and isinstance(carg, VarExpr):
+                        q_name, c_name = qarg.name, carg.name
+                        q_sz = reg_sizes.get(q_name, 0)
+                        c_sz = reg_sizes.get(c_name, 0)
+                        for i in range(min(q_sz, c_sz)):
+                            qkey = (q_name, i)
+                            ckey = (c_name, i)
+                            if qkey in qubit_map and ckey in classical_map:
+                                sv = Statevector(circuit)
+                                qidx = qubit_map[qkey]
+                                probs = sv.probabilities([qidx])
+                                import random
+                                r = random.random()
+                                outcome = 1 if r < probs[1] else 0
+                                classical_map[ckey] = outcome
+                        return
+                    qkey = ckey = None
                     if isinstance(qarg, IndexExpr) and isinstance(qarg.base, VarExpr):
                         qi = eval_expr(qarg.index, ctx)
                         if isinstance(qi, int):
@@ -422,10 +442,6 @@ def get_prints(quanta_code: str) -> str:
                         r = random.random()
                         outcome = 1 if r < probs[1] else 0
                         classical_map[ckey] = outcome
-                        # Collapse: project state (simplified - in full impl apply measurement)
-                        # We don't modify circuit for collapse; we track classical outcome
-                        # and for next statevector we would need to apply projection.
-                        # For get_prints we only need classical side for later Print(c).
                         return
                 if name in ("H", "X", "Y", "Z", "CNot", "CNOT", "CZ", "Swap", "SWAP", "RZ", "RY", "RX"):
                     apply_gate(name, expr.args, ctx)

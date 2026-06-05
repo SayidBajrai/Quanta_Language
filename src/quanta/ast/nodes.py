@@ -54,11 +54,12 @@ class LetDecl(Stmt):
 
 
 class QuantumDecl(Stmt):
-    """Quantum register declaration (qubit/bit/qint/bint)"""
+    """Quantum register declaration (qubit/bit/qint/bint/qdec/qfloat)"""
     
-    def __init__(self, kind: str, size: Optional[int], name: str, value: Optional[Expr] = None):
-        self.kind = kind  # "qubit", "bit", "qint", or "bint"
+    def __init__(self, kind: str, size: Optional[int], name: str, value: Optional[Expr] = None, size2: Optional[int] = None):
+        self.kind = kind  # "qubit", "bit", "qint", "bint", "qdec", or "qfloat"
         self.size = size
+        self.size2 = size2  # Second dimension for qdec[int_bits, frac_bits] and qfloat[ebits, mbits]
         self.name = name
         self.value = value  # Initialization value (e.g., qint[3] x = 2)
 
@@ -138,6 +139,16 @@ class IndexExpr(Expr):
     def __init__(self, base: Expr, index: Expr):
         self.base = base
         self.index = index
+
+
+class SliceExpr(Expr):
+    """Slice expression (Python-style register slice), e.g. q[1:4] or q[1:4:2]"""
+    
+    def __init__(self, base: Expr, start: Expr, end: Expr, step: Optional[Expr] = None):
+        self.base = base
+        self.start = start
+        self.end = end
+        self.step = step  # None means step 1
 
 
 class BinaryExpr(Expr):

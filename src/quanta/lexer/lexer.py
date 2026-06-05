@@ -36,6 +36,8 @@ class TokenType(Enum):
     DICT = "DICT"
     QINT = "QINT"
     BINT = "BINT"
+    QDEC = "QDEC"
+    QFLOAT = "QFLOAT"
     
     # Literals
     IDENT = "IDENT"
@@ -98,6 +100,8 @@ class Lexer:
         "bit": TokenType.BIT,
         "qint": TokenType.QINT,
         "bint": TokenType.BINT,
+        "qdec": TokenType.QDEC,
+        "qfloat": TokenType.QFLOAT,
         "for": TokenType.FOR,
         "if": TokenType.IF,
         "else": TokenType.ELSE,

@@ -2,12 +2,12 @@
 OpenQASM 3 code generator
 """
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from ..ast.nodes import (
     Program, Stmt, Expr,
     VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
     ForStmt, IfStmt, ReturnStmt, ExprStmt,
-    CallExpr, IndexExpr, BinaryExpr, UnaryExpr,
+    CallExpr, IndexExpr, SliceExpr, BinaryExpr, UnaryExpr,
     VarExpr, LiteralExpr, ListExpr, GroupExpr, AssignExpr,
     Node
 )
@@ -36,6 +36,11 @@ QUANTUM_ARITHMETIC_OPS = {
     "QAdd", "QMult", "Compare", "Grover",
     "QFTAdd", "QTreeAdd", "QExpEncMult", "QTreeMult",
     "QSub", "QDiv", "QMod"
+}
+
+# High-level quantum gates (will be lowered to QASM circuits)
+HIGH_LEVEL_GATES = {
+    "Bell", "GHZ", "WState", "SwapGate", "QFT", "InverseQFT"
 }
 
 
@@ -88,12 +93,18 @@ class QASM3Generator(Visitor):
     
     def visit_quantum_decl(self, node: QuantumDecl) -> None:
         """Generate quantum register declaration"""
-        size = node.size or 1
+        # Compute total size: single dimension or qdec/qfloat two-dimension
+        if node.kind == "qdec" and node.size is not None and node.size2 is not None:
+            size = node.size + node.size2  # int_bits + frac_bits
+        elif node.kind == "qfloat" and node.size is not None and node.size2 is not None:
+            size = 1 + node.size + node.size2  # sign + exponent_bits + mantissa_bits
+        else:
+            size = node.size or 1
         self.registers[node.name] = (node.kind, size)
         
-        # Map qint/bint to qubit/bit for QASM output
+        # Map qint/bint/qdec/qfloat to qubit/bit for QASM output
         qasm_kind = node.kind
-        if qasm_kind == "qint":
+        if qasm_kind in ("qint", "qdec", "qfloat"):
             qasm_kind = "qubit"
         elif qasm_kind == "bint":
             qasm_kind = "bit"
@@ -214,9 +225,38 @@ class QASM3Generator(Visitor):
                 self._handle_quantum_arithmetic(name, node.args)
                 return
             
-            # Handle standard library functions
-            if name == "MeasureAll":
-                self._handle_measure_all(node.args)
+            # Handle high-level quantum gates (support whole register and slice)
+            if name in HIGH_LEVEL_GATES:
+                # Register-wise Bell/GHZ: all args same-size registers -> apply per index
+                rw = self._get_register_wise_info(node.args)
+                if name == "Bell" and len(node.args) == 2 and rw is not None:
+                    self._generate_bell_register_wise(node.args, rw[0], rw[1])
+                    return
+                if name == "GHZ" and len(node.args) >= 2 and rw is not None:
+                    self._generate_ghz_register_wise(node.args, rw[0], rw[1])
+                    return
+                expanded = self._expand_qubit_args(node.args)
+                if expanded is not None:
+                    self._handle_high_level_gate(name, expanded, node.modifiers, node.ctrl_count)
+                return
+            
+            # Handle Measure(q, c): single qubit or full registers (replaces MeasureAll)
+            if name == "Measure" and len(node.args) == 2:
+                if isinstance(node.args[0], VarExpr) and isinstance(node.args[1], VarExpr):
+                    q_name = node.args[0].name
+                    c_name = node.args[1].name
+                    if q_name in self.registers and c_name in self.registers:
+                        q_kind, q_size = self.registers[q_name]
+                        c_kind, c_size = self.registers[c_name]
+                        if q_kind in ("qubit", "qint", "qdec", "qfloat") and c_kind in ("bit", "bint"):
+                            size = min(q_size, c_size)
+                            for i in range(size):
+                                self.lines.append(f"measure {q_name}[{i}] -> {c_name}[{i}];")
+                            return
+                # Single qubit/bit: Measure(q[i], c[i])
+                q_str = self._expr_to_qasm(node.args[0])
+                c_str = self._expr_to_qasm(node.args[1])
+                self.lines.append(f"measure {q_str} -> {c_str};")
                 return
             elif name == "print":
                 # Print is frontend-only, doesn't generate QASM
@@ -236,43 +276,44 @@ class QASM3Generator(Visitor):
             
             # Handle built-in gates
             if name in GATE_MAP:
-                # Build modifier prefix
-                modifier_prefix = ""
-                if node.modifiers:
-                    mods = []
-                    if "inv" in node.modifiers:
-                        mods.append("inv")
-                    if "ctrl" in node.modifiers:
-                        if node.ctrl_count:
-                            mods.append(f"ctrl[{node.ctrl_count}]")
-                        else:
-                            mods.append("ctrl")
-                    if mods:
-                        modifier_prefix = " @ ".join(mods) + " @ "
-                
-                qasm_name = GATE_MAP[name]
-                operands = []
-                for arg in node.args:
-                    operands.append(self._expr_to_qasm(arg))
-                
-                if name == "Measure" and len(operands) == 2:
-                    # Special handling for measure (no modifiers allowed)
-                    self.lines.append(f"measure {operands[0]} -> {operands[1]};")
-                elif name in ["RZ", "RY", "RX"] and len(operands) >= 2:
-                    # Parameterized gates
-                    param = operands[0]
-                    qubits = ", ".join(operands[1:])
-                    if modifier_prefix:
-                        self.lines.append(f"{modifier_prefix}{qasm_name}({param}) {qubits};")
-                    else:
-                        self.lines.append(f"{qasm_name}({param}) {qubits};")
+                # Measure already handled above
+                if name == "Measure":
+                    pass  # handled in Measure branch
                 else:
-                    # Standard gates
-                    qubits = ", ".join(operands)
-                    if modifier_prefix:
-                        self.lines.append(f"{modifier_prefix}{qasm_name} {qubits};")
+                    # Build modifier prefix
+                    modifier_prefix = ""
+                    if node.modifiers:
+                        mods = []
+                        if "inv" in node.modifiers:
+                            mods.append("inv")
+                        if "ctrl" in node.modifiers:
+                            if node.ctrl_count:
+                                mods.append(f"ctrl[{node.ctrl_count}]")
+                            else:
+                                mods.append("ctrl")
+                        if mods:
+                            modifier_prefix = " @ ".join(mods) + " @ "
+                    
+                    qasm_name = GATE_MAP[name]
+                    operands = []
+                    for arg in node.args:
+                        operands.append(self._expr_to_qasm(arg))
+                    
+                    if name in ["RZ", "RY", "RX"] and len(operands) >= 2:
+                        # Parameterized gates
+                        param = operands[0]
+                        qubits = ", ".join(operands[1:])
+                        if modifier_prefix:
+                            self.lines.append(f"{modifier_prefix}{qasm_name}({param}) {qubits};")
+                        else:
+                            self.lines.append(f"{qasm_name}({param}) {qubits};")
                     else:
-                        self.lines.append(f"{qasm_name} {qubits};")
+                        # Standard gates
+                        qubits = ", ".join(operands)
+                        if modifier_prefix:
+                            self.lines.append(f"{modifier_prefix}{qasm_name} {qubits};")
+                        else:
+                            self.lines.append(f"{qasm_name} {qubits};")
             else:
                 # Function call - should have been inlined
                 pass
@@ -284,6 +325,19 @@ class QASM3Generator(Visitor):
         if isinstance(base, str) and isinstance(index, str):
             return f"{base}[{index}]"
         return f"{base}[{index}]"
+
+    def visit_slice_expr(self, node: SliceExpr) -> str:
+        """Slice is expanded elsewhere (high-level gates); here emit first index only if used standalone."""
+        start = self._eval_to_int(node.start)
+        end = self._eval_to_int(node.end)
+        step = self._eval_to_int(node.step) if node.step is not None else 1
+        if start is not None and end is not None and step is not None and step != 0:
+            indices = list(range(start, end, step))
+            if indices:
+                first = IndexExpr(node.base, LiteralExpr(indices[0]))
+                return self._expr_to_qasm(first)
+        base = self.visit(node.base)
+        return f"{base}[0]"
     
     def visit_binary_expr(self, node: BinaryExpr) -> str:
         """Binary expressions (for compile-time evaluation)"""
@@ -1474,32 +1528,246 @@ class QASM3Generator(Visitor):
         # 2. Implement full reversible subtraction with proper uncomputation
         # 3. Handle edge cases more carefully
     
-    def _handle_measure_all(self, args: List[Expr]):
-        """Handle MeasureAll(q, c) stdlib function"""
-        if len(args) != 2:
+    def _expand_qubit_args(self, args: List[Expr]) -> Optional[List[Expr]]:
+        """Expand register and slice arguments to a flat list of single-qubit IndexExprs.
+        Returns None if any argument cannot be expanded (e.g. not a register/slice/index).
+        """
+        import math
+        result: List[Expr] = []
+        for arg in args:
+            if isinstance(arg, VarExpr):
+                # Whole register: q -> q[0], q[1], ... (only quantum registers)
+                if arg.name not in self.registers:
+                    return None
+                kind, size = self.registers[arg.name]
+                if kind not in ("qubit", "qint", "qdec", "qfloat"):
+                    return None
+                for i in range(size):
+                    result.append(IndexExpr(VarExpr(arg.name), LiteralExpr(i)))
+            elif isinstance(arg, SliceExpr):
+                # Slice: q[1:4] -> q[1], q[2], q[3] (Python-style, end exclusive)
+                start = self._eval_to_int(arg.start)
+                end = self._eval_to_int(arg.end)
+                step = self._eval_to_int(arg.step) if arg.step is not None else 1
+                if start is None or end is None or step is None or step == 0:
+                    return None
+                for i in range(start, end, step):
+                    result.append(IndexExpr(arg.base, LiteralExpr(i)))
+            elif isinstance(arg, IndexExpr):
+                result.append(arg)
+            else:
+                return None
+        return result
+
+    def _eval_to_int(self, expr: Expr) -> Optional[int]:
+        """Evaluate a compile-time expression to a Python int (for slice bounds)."""
+        import math
+        if isinstance(expr, LiteralExpr):
+            try:
+                v = expr.value
+                if isinstance(v, (int, float)):
+                    return int(v)
+                if isinstance(v, str) and v.lstrip("-").isdigit():
+                    return int(v)
+            except (ValueError, TypeError):
+                pass
+            return None
+        if isinstance(expr, VarExpr):
+            if expr.name == "pi":
+                return int(math.pi)
+            return None
+        if isinstance(expr, GroupExpr):
+            return self._eval_to_int(expr.expr)
+        if isinstance(expr, UnaryExpr):
+            if expr.op == "-":
+                inner = self._eval_to_int(expr.right)
+                return -inner if inner is not None else None
+            return None
+        if isinstance(expr, BinaryExpr):
+            left = self._eval_to_int(expr.left)
+            right = self._eval_to_int(expr.right)
+            if left is None or right is None:
+                return None
+            if expr.op == "+":
+                return left + right
+            if expr.op == "-":
+                return left - right
+            if expr.op == "*":
+                return left * right
+            if expr.op == "/":
+                return left // right if right != 0 else None
+        return None
+
+    def _get_register_wise_info(self, args: List[Expr]) -> Optional[Tuple[int, List[str]]]:
+        """If all args are whole quantum registers of the same size, return (size, [reg_names]). Else None."""
+        if not args:
+            return None
+        names: List[str] = []
+        size: Optional[int] = None
+        for arg in args:
+            if not isinstance(arg, VarExpr) or arg.name not in self.registers:
+                return None
+            kind, n = self.registers[arg.name]
+            if kind not in ("qubit", "qint", "qdec", "qfloat"):
+                return None
+            if size is None:
+                size = n
+            elif size != n:
+                return None
+            names.append(arg.name)
+        return (size, names) if size is not None else None
+
+    def _handle_high_level_gate(self, gate_name: str, args: List[Expr], modifiers: List[str], ctrl_count: Optional[int]):
+        """Handle high-level quantum gates (Bell, GHZ, WState, SwapGate, QFT, InverseQFT).
+        args must already be expanded to a flat list of single-qubit expressions."""
+        if gate_name == "Bell":
+            if len(args) != 2:
+                return
+            self._generate_bell_gate(args)
+        elif gate_name == "GHZ":
+            if len(args) < 2:
+                return
+            self._generate_ghz_gate(args)
+        elif gate_name == "WState":
+            if len(args) != 3:
+                return
+            self._generate_wstate_gate(args)
+        elif gate_name == "SwapGate":
+            if len(args) != 2:
+                return
+            self._generate_swap_gate(args)
+        elif gate_name == "QFT":
+            if len(args) < 1:
+                return
+            self._generate_qft_gate(args)
+        elif gate_name == "InverseQFT":
+            if len(args) < 1:
+                return
+            self._generate_inverse_qft_gate(args)
+    
+    def _generate_bell_register_wise(self, args: List[Expr], size: int, names: List[str]):
+        """Register-wise Bell: for each index i, H(a[i]); CX(a[i], b[i])."""
+        a, b = names[0], names[1]
+        self.lines.append(f"// Bell({a}, {b}) register-wise")
+        for i in range(size):
+            self.lines.append(f"h {a}[{i}];")
+            self.lines.append(f"cx {a}[{i}], {b}[{i}];")
+
+    def _generate_bell_gate(self, args: List[Expr]):
+        """Generate Bell state: H(q0), CNot(q0, q1)"""
+        q0 = self._expr_to_qasm(args[0])
+        q1 = self._expr_to_qasm(args[1])
+        self.lines.append(f"// Bell({q0}, {q1})")
+        self.lines.append(f"h {q0};")
+        self.lines.append(f"cx {q0}, {q1};")
+
+    def _generate_ghz_register_wise(self, args: List[Expr], size: int, names: List[str]):
+        """Register-wise GHZ: for each index i, H(r0[i]); CX(r0[i], r1[i]); CX(r0[i], r2[i]); ..."""
+        self.lines.append(f"// GHZ({', '.join(names)}) register-wise")
+        r0 = names[0]
+        for i in range(size):
+            self.lines.append(f"h {r0}[{i}];")
+            for j in range(1, len(names)):
+                self.lines.append(f"cx {r0}[{i}], {names[j]}[{i}];")
+    
+    def _generate_ghz_gate(self, args: List[Expr]):
+        """Generate GHZ state: H(q0), then chain CNOTs"""
+        qubits = [self._expr_to_qasm(arg) for arg in args]
+        self.lines.append(f"// GHZ({', '.join(qubits)})")
+        if len(qubits) < 2:
             return
-        q_reg = self._expr_to_qasm(args[0])
-        c_reg = self._expr_to_qasm(args[1])
-        # Extract register names (simplified - assumes q[0] format)
-        q_name = q_reg.split("[")[0] if "[" in q_reg else q_reg
-        c_name = c_reg.split("[")[0] if "[" in c_reg else c_reg
         
-        # Check if both are full registers (not indexed)
-        q_is_register = "[" not in q_reg or q_reg.endswith("]") and q_reg.count("[") == 1
-        c_is_register = "[" not in c_reg or c_reg.endswith("]") and c_reg.count("[") == 1
+        # Apply Hadamard to first qubit
+        self.lines.append(f"h {qubits[0]};")
         
-        # Get register sizes
-        q_size = self.registers.get(q_name, (None, 1))[1] if q_name in self.registers else 1
-        c_size = self.registers.get(c_name, (None, 1))[1] if c_name in self.registers else 1
+        # Chain CNOTs: q0 -> q1, q1 -> q2, q2 -> q3, etc.
+        for i in range(len(qubits) - 1):
+            self.lines.append(f"cx {qubits[i]}, {qubits[i+1]};")
+    
+    def _generate_wstate_gate(self, args: List[Expr]):
+        """Generate W state: (|100⟩ + |010⟩ + |001⟩) / √3"""
+        q0 = self._expr_to_qasm(args[0])
+        q1 = self._expr_to_qasm(args[1])
+        q2 = self._expr_to_qasm(args[2])
+        self.lines.append(f"// WState({q0}, {q1}, {q2})")
         
-        # If both are full registers of same size, use register-to-register measurement
-        if q_is_register and c_is_register and q_size == c_size and q_size > 1:
-            self.lines.append(f"measure {q_name} -> {c_name};")
-        else:
-            # Generate individual measure statements
-            size = min(q_size, c_size)
-            for i in range(size):
-                self.lines.append(f"measure {q_name}[{i}] -> {c_name}[{i}];")
+        # W state preparation: RY(2*acos(1/sqrt(3))) on q0, then CNOTs
+        import math
+        theta = 2 * math.acos(1 / math.sqrt(3))
+        self.lines.append(f"ry({theta}) {q0};")
+        self.lines.append(f"cx {q0}, {q1};")
+        self.lines.append(f"cx {q0}, {q2};")
+    
+    def _generate_swap_gate(self, args: List[Expr]):
+        """Generate swap gate: 3 CNOTs (Fredkin-like decomposition)"""
+        a = self._expr_to_qasm(args[0])
+        b = self._expr_to_qasm(args[1])
+        self.lines.append(f"// SwapGate({a}, {b})")
+        self.lines.append(f"cx {a}, {b};")
+        self.lines.append(f"cx {b}, {a};")
+        self.lines.append(f"cx {a}, {b};")
+    
+    def _generate_qft_gate(self, args: List[Expr]):
+        """Generate Quantum Fourier Transform circuit"""
+        qubits = [self._expr_to_qasm(arg) for arg in args]
+        n = len(qubits)
+        self.lines.append(f"// QFT({', '.join(qubits)})")
+        
+        if n == 0:
+            return
+        
+        # Extract register names for indexing
+        qubit_names = []
+        qubit_indices = []
+        for q in qubits:
+            if "[" in q:
+                name, idx = q.split("[")
+                idx = idx.rstrip("]")
+                qubit_names.append(name)
+                qubit_indices.append(int(idx))
+            else:
+                qubit_names.append(q)
+                qubit_indices.append(0)
+        
+        # QFT: Apply Hadamard and controlled rotations
+        for i in range(n):
+            # Hadamard on qubit i
+            self.lines.append(f"h {qubits[i]};")
+            
+            # Controlled rotations from qubit i to qubits j > i
+            for j in range(i + 1, n):
+                phase = f"pi/{2**(j-i)}"
+                self.lines.append(f"crz({phase}) {qubits[j]}, {qubits[i]};")
+        
+        # Bit-reversal (swap qubits)
+        for i in range(n // 2):
+            self.lines.append(f"swap {qubits[i]}, {qubits[n-1-i]};")
+    
+    def _generate_inverse_qft_gate(self, args: List[Expr]):
+        """Generate Inverse Quantum Fourier Transform circuit"""
+        qubits = [self._expr_to_qasm(arg) for arg in args]
+        n = len(qubits)
+        self.lines.append(f"// InverseQFT({', '.join(qubits)})")
+        
+        if n == 0:
+            return
+        
+        # Inverse QFT: exact reverse of QFT
+        
+        # Step 1: Bit-reversal (same as QFT, but done first in inverse)
+        for i in range(n // 2):
+            self.lines.append(f"swap {qubits[i]}, {qubits[n-1-i]};")
+        
+        # Step 2: Apply controlled rotations in reverse order with negative phases
+        # Reverse the order: from n-1 down to 0
+        for i in range(n - 1, -1, -1):
+            # Controlled rotations from qubit i to qubits j > i (in reverse order)
+            for j in range(n - 1, i, -1):
+                phase = f"-pi/{2**(j-i)}"
+                self.lines.append(f"crz({phase}) {qubits[j]}, {qubits[i]};")
+            
+            # Hadamard on qubit i (last operation for each qubit in inverse QFT)
+            self.lines.append(f"h {qubits[i]};")
     
     def visit(self, node: Node):
         """Generic visit method"""
@@ -1531,6 +1799,8 @@ class QASM3Generator(Visitor):
             return self.visit_call_expr(node)
         elif isinstance(node, IndexExpr):
             return self.visit_index_expr(node)
+        elif isinstance(node, SliceExpr):
+            return self.visit_slice_expr(node)
         elif isinstance(node, BinaryExpr):
             return self.visit_binary_expr(node)
         elif isinstance(node, UnaryExpr):

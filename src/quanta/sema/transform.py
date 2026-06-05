@@ -7,7 +7,7 @@ from ..ast.nodes import (
     Program, Stmt, Expr,
     VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
     ForStmt, IfStmt, ReturnStmt, ExprStmt,
-    CallExpr, IndexExpr, BinaryExpr, UnaryExpr,
+    CallExpr, IndexExpr, SliceExpr, BinaryExpr, UnaryExpr,
     VarExpr, LiteralExpr, ListExpr, GroupExpr, AssignExpr,
 )
 from ..ast.visitor import Visitor
@@ -101,6 +101,13 @@ class ASTTransformer(Visitor):
         elif isinstance(expr, IndexExpr):
             expr.base = self._transform_expression(expr.base)
             expr.index = self._transform_expression(expr.index)
+            return expr
+        elif isinstance(expr, SliceExpr):
+            expr.base = self._transform_expression(expr.base)
+            expr.start = self._transform_expression(expr.start)
+            expr.end = self._transform_expression(expr.end)
+            if expr.step is not None:
+                expr.step = self._transform_expression(expr.step)
             return expr
         elif isinstance(expr, UnaryExpr):
             expr.right = self._transform_expression(expr.right)

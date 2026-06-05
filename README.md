@@ -31,13 +31,13 @@ source = """
 qubit[2] q
 bit[2] c
 
-gate Bell(a, b) {
+gate Bellgate(a, b) {
     H(a)
     CNot(a, b)
 }
 
-Bell(q[0], q[1])
-MeasureAll(q, c)
+Bellgate(q[0], q[1])
+Measure(q, c)
 """
 
 qasm = compile(source)
@@ -75,14 +75,14 @@ quanta check example.qta
 qubit[2] q
 bit[2] c
 
-gate Bell(a, b) {
+gate Bellgate(a, b) {
     H(a)
     CNot(a, b)
 }
 
-Bell(q[0], q[1])
+Bellgate(q[0], q[1])
 
-MeasureAll(q, c)
+Measure(q, c)
 Print(c)
 ```
 
@@ -104,14 +104,15 @@ measure q[1] -> c[1];
 
 ## Language Features
 
-- **Types**: `int`, `float`, `bool`, `str`, `list`, `dict`, `qubit`, `bit`, `qint[n]`, `bint[n]`
+- **Types**: `int`, `float`, `bool`, `str`, `list`, `dict`, `qubit`, `bit`, `qint[n]`, `bint[n]`, `qdec[int_bits, frac_bits]`, `qfloat[ebits, mbits]`
 - **Gate Macros**: `gate` keyword for compile-time circuit composition
 - **Modifiers**: `ctrl` and `inv` (dagger) modifiers for gates, and `reset` for qubits
 - **Functions**: Compile-time inlined for quantum operations
 - **Control Flow**: `for` loops (unrolled), `if/else` (classical only)
 - **Gate Set**: `H`, `X`, `CNot`, `CZ`, `Swap`, `RZ`, `Measure`, and more
-- **Quantum Arithmetic**: `QAdd`, `QMult`, `Compare`, `Grover`; operator overloading `+` and `*` on `qint`
-- **Standard Library**: `Print()`, `Len()`, `MeasureAll()`, `Assert()`, `Range()`
+- **High-Level Gates**: `Bell`, `GHZ`, `WState`, `SwapGate`, `QFT`, `InverseQFT`
+- **Quantum Arithmetic**: `QAdd`, `QMult`, `Compare`, `Grover`; operator overloading `+` and `*` on `qint`; fixed-point (`qdec`) and floating-point (`qfloat`) registers
+- **Standard Library**: `Print()`, `Len()`, `Measure()`, `Assert()`, `Range()`
 - **Constants**: Built-in `pi`, `e`, and user-defined `const` declarations
 - **API**: `compile(source)`, `run(source, shots=...)`, `get_prints(source)` (frontend debug, simulator only)
 
@@ -156,6 +157,8 @@ qubit[n]
 bit[n]
 qint[n]    // Quantum integer (N qubits)
 bint[n]    // Classical bit integer (N classical bits)
+qdec[int_bits, frac_bits]   // Quantum fixed-point (int_bits + frac_bits qubits)
+qfloat[ebits, mbits]        // Quantum floating-point (1 + ebits + mbits qubits, IEEE-754-like)
 ```
 
 📌 **Rules**
@@ -210,6 +213,18 @@ q[qidx[1]]
 📌 **Quantum rule**
 
 > Any array used in quantum operations **must be compile-time resolvable**.
+
+#### Register slicing (Python-style)
+
+Quantum registers support **slice** syntax like Python (start:end, end exclusive):
+
+```quanta
+qubit[6] q
+q[1:4]        // slice: qubits 1, 2, 3 (start:end, end exclusive)
+q[0:2:6]      // step 2: qubits 0, 2, 4 (start:step:end)
+```
+
+Slices are **compile-time** (start, end, step must be constant expressions). They are used with high-level gates (e.g. `GHZ(q[1:4])`) and expand to the corresponding list of qubits.
 
 ### Dictionaries (Maps)
 
@@ -318,6 +333,43 @@ x q[1];          // Set bit 1 (second bit) to |1⟩
 ```
 
 The value `2` in binary is `010` (bits from LSB to MSB: 0, 1, 0), so only `q[1]` is set to |1⟩.
+
+### Quantum Fixed-Point and Floating-Point (`qdec` and `qfloat`)
+
+#### `qdec[int_bits, frac_bits]` — Quantum fixed-point decimal
+
+Represents a real number with a **fixed binary point** (like classical fixed-point in DSP/embedded systems):
+
+```quanta
+qdec[16, 8] x
+```
+
+- **Storage**: `int_bits + frac_bits` qubits (scaled integer: `value = raw_integer / 2^frac_bits`).
+- **Use when**: Bounded numeric computations, filter coefficients, controlled rotations, ML weights in a known range; reversible arithmetic is simpler and cheaper than floating-point.
+
+#### `qfloat[ebits, mbits]` — Quantum floating-point (IEEE-754–like)
+
+Quantum analogue of IEEE-754:
+
+```quanta
+qfloat[8, 23] x   // 32-bit style: 1 sign + 8 exponent + 23 mantissa
+```
+
+- **Storage**: `1 + ebits + mbits` qubits (sign, exponent, mantissa; `value = (-1)^sign × (1 + fraction/2^mbits) × 2^(exponent - bias)`).
+- **Use when**: Wide dynamic range (scientific computation); semantics (NaN, infinities, subnormals) align with classical floats.
+- **Cost**: Reversible floating-point is much more expensive in qubits and gates than fixed-point.
+
+#### When to use which
+
+| Use case | Prefer |
+|----------|--------|
+| Bounded numerics (coefficients, rotations, thresholds) | `qdec[int_bits, frac_bits]` |
+| Physics simulations across wide scales | `qfloat[ebits, mbits]` |
+| ML weights in [–1, 1] or known range | `qdec[...]` |
+| Real IEEE semantics (NaN, infinities, subnormals) | `qfloat[...]` |
+| Hardware-efficient arithmetic, minimal ancilla | `qdec[...]` |
+
+Both types lower to plain `qubit[n]` in OpenQASM 3; arithmetic and interpretation are left to libraries or future extensions.
 
 ### Quantum Arithmetic Operations
 
@@ -811,7 +863,7 @@ RZ(pi/2, q[0])
 Compile-time circuit composition.
 
 ```quanta
-gate Bell(a, b) {
+gate Bellgate(a, b) {
     H(a)
     CNot(a, b)
 }
@@ -820,7 +872,7 @@ gate Bell(a, b) {
 Usage:
 
 ```quanta
-Bell(q[0], q[1])
+Bellgate(q[0], q[1])
 ```
 
 📌 `gate`:
@@ -828,6 +880,153 @@ Bell(q[0], q[1])
 - Cannot return
 - Expands inline
 - Accepts modifiers (`ctrl`, `inv`)
+
+### High-Level Quantum Gates
+
+Quanta provides built-in high-level quantum gates that compile to standard OpenQASM 3 circuits. These gates make the language more expressive and user-friendly.
+
+#### `Bell(q0, q1)` - Bell State Preparation
+
+Prepares a **Bell pair** (maximally entangled 2-qubit state):
+
+```
+|00⟩ → (|00⟩ + |11⟩) / √2
+```
+
+**Usage:**
+```quanta
+qubit[2] q
+Bell(q[0], q[1])
+```
+
+**OpenQASM 3 Equivalent:**
+```qasm
+h q[0];
+cx q[0], q[1];
+```
+
+**Explanation:**
+- Hadamard on first qubit → puts it into superposition
+- CNOT entangles the second qubit with the first
+
+#### `GHZ(q0, q1, ...)` - GHZ State Preparation
+
+Prepares a **GHZ state** on ≥2 qubits:
+
+```
+|000…⟩ → (|000…⟩ + |111…⟩) / √2
+```
+
+You can pass the **whole register**, a **slice**, or **explicit qubits**:
+
+**Usage:**
+```quanta
+qubit[6] q
+
+GHZ(q)                   // whole register → GHZ on q[0]..q[5]
+GHZ(q[0], q[1], q[2])    // explicit qubits
+GHZ(q[1:4])              // slice → GHZ on q[1], q[2], q[3]
+```
+
+**OpenQASM 3 Equivalent (e.g. GHZ(q[0], q[1], q[2])):**
+```qasm
+h q[0];
+cx q[0], q[1];
+cx q[1], q[2];
+// ... continues chain for more qubits
+```
+
+**General rule:**  
+Prepare superposition on the first qubit, then cascade CNOTs down the list.
+
+#### `WState(q0, q1, q2)` - W State Preparation
+
+Creates a **3-qubit W state**:
+
+```
+(|100⟩ + |010⟩ + |001⟩) / √3
+```
+
+**Usage:**
+```quanta
+qubit[3] q
+WState(q[0], q[1], q[2])
+```
+
+**OpenQASM 3 Equivalent:**
+```qasm
+ry(2*acos(1/sqrt(3))) q[0];
+cx q[0], q[1];
+cx q[0], q[2];
+```
+
+This produces the equal-superposition of one excitation across three qubits.
+
+#### `SwapGate(a, b)` - Swap Gate
+
+Swaps two qubits using the standard 3-CNOT decomposition.
+
+**Usage:**
+```quanta
+qubit[4] q
+SwapGate(q[0], q[3])
+```
+
+**OpenQASM 3 Equivalent:**
+```qasm
+cx q[0], q[3];
+cx q[3], q[0];
+cx q[0], q[3];
+```
+
+Classic CX ladder swap.
+
+#### `QFT(q0, q1, ...)` - Quantum Fourier Transform
+
+Applies the **Quantum Fourier Transform** on a register of qubits.
+
+**Usage:**
+```quanta
+qubit[4] q
+QFT(q[0], q[1], q[2], q[3])
+```
+
+**OpenQASM 3 Equivalent:**
+```qasm
+h q[0];
+crz(pi/2) q[1], q[0];
+crz(pi/4) q[2], q[0];
+crz(pi/8) q[3], q[0];
+
+h q[1];
+crz(pi/2) q[2], q[1];
+crz(pi/4) q[3], q[1];
+
+h q[2];
+crz(pi/2) q[3], q[2];
+
+h q[3];
+
+// Bit-reversal (swap)
+swap q[0], q[3];
+swap q[1], q[2];
+```
+
+This is the canonical QFT decomposition.
+
+#### `InverseQFT(q0, q1, ...)` - Inverse Quantum Fourier Transform
+
+Applies the **Inverse Quantum Fourier Transform** (reverse of QFT).
+
+**Usage:**
+```quanta
+qubit[4] q
+InverseQFT(q[0], q[1], q[2], q[3])
+```
+
+**OpenQASM 3 Equivalent:**
+
+Same gates as QFT in reverse order with `crz(-θ)` instead of `crz(θ)`.
 
 ### Controlled (ctrl) & Dagger (inv) Modifiers
 
@@ -950,7 +1149,7 @@ print(q)
 ```quanta
 Len(q)
 Range(0, 3)
-MeasureAll(q, c)
+Measure(q, c)
 reset q 
 Assert(len(q) == len(c))
 Error("Invalid circuit")
@@ -978,11 +1177,10 @@ Warn("Simulator-only feature")
   }
   ```
 
-- **`MeasureAll(q, c)`** - Convenience function that measures all qubits in register `q` to corresponding classical bits in register `c`. Generates individual `measure` statements for each qubit. Both registers must have the same size.
+- **`Measure(q, c)`** - Measures qubit(s) to classical bit(s). Use `Measure(q[i], c[i])` for a single qubit, or `Measure(q, c)` with full registers to measure all qubits in `q` to the corresponding bits in `c` (registers must have the same size). Generates individual `measure` statements.
   ```quanta
-  qubit[3] q
-  bit[3] c
-  MeasureAll(q, c)  // Equivalent to: measure(q[0], c[0]); measure(q[1], c[1]); measure(q[2], c[2]);
+  Measure(q[0], c[0])     // Single qubit
+  Measure(q, c)          // Full registers: measure q[0]->c[0], q[1]->c[1], ...
   ```
 
 - **`reset q`** - Resets one or more qubits to the |0⟩ state. Maps to OpenQASM 3 `reset` statement. Useful for reinitializing qubits during circuit execution.
@@ -1017,14 +1215,14 @@ Warn("Simulator-only feature")
 qubit[2] q
 bit[2] c
 
-gate Bell(a, b) {
+gate Bellgate(a, b) {
     H(a)
     CNot(a, b)
 }
 
-Bell(q[0], q[1])
+Bellgate(q[0], q[1])
 
-MeasureAll(q, c)
+Measure(q, c)
 Print(c)
 ```
 

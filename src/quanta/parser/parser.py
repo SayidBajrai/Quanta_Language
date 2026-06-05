@@ -8,7 +8,7 @@ from ..ast.nodes import (
     Program, Stmt, Expr,
     VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
     ForStmt, IfStmt, ReturnStmt, ExprStmt,
-    CallExpr, IndexExpr, BinaryExpr, UnaryExpr,
+    CallExpr, IndexExpr, SliceExpr, BinaryExpr, UnaryExpr,
     VarExpr, LiteralExpr, ListExpr, GroupExpr, AssignExpr,
 )
 from ..errors import QuantaSyntaxError
@@ -63,7 +63,8 @@ class Parser:
             return self._parse_const_decl()
         elif self._match(TokenType.LET):
             return self._parse_let_decl()
-        elif self._check(TokenType.QUBIT) or self._check(TokenType.BIT) or self._check(TokenType.QINT) or self._check(TokenType.BINT):
+        elif (self._check(TokenType.QUBIT) or self._check(TokenType.BIT) or self._check(TokenType.QINT)
+              or self._check(TokenType.BINT) or self._check(TokenType.QDEC) or self._check(TokenType.QFLOAT)):
             return self._parse_quantum_decl()
         elif self._match(TokenType.FOR):
             return self._parse_for()
@@ -195,17 +196,39 @@ class Parser:
             kind = "qint"
         elif kind_token.type == TokenType.BINT:
             kind = "bint"
+        elif kind_token.type == TokenType.QDEC:
+            kind = "qdec"
+        elif kind_token.type == TokenType.QFLOAT:
+            kind = "qfloat"
         else:
             kind = "qubit"  # Default
         
         size = None
+        size2 = None
         if self._match(TokenType.LBRACKET):
-            size_expr = self._parse_expression()
-            if isinstance(size_expr, LiteralExpr):
-                try:
-                    size = int(size_expr.value)
-                except (ValueError, TypeError):
-                    pass
+            if kind in ("qdec", "qfloat"):
+                # Two-argument form: qdec[int_bits, frac_bits] or qfloat[ebits, mbits]
+                size_expr = self._parse_expression()
+                if isinstance(size_expr, LiteralExpr):
+                    try:
+                        size = int(size_expr.value)
+                    except (ValueError, TypeError):
+                        pass
+                self._consume(TokenType.COMMA, "Expected ',' in qdec/qfloat dimensions")
+                size2_expr = self._parse_expression()
+                if isinstance(size2_expr, LiteralExpr):
+                    try:
+                        size2 = int(size2_expr.value)
+                    except (ValueError, TypeError):
+                        pass
+            else:
+                # Single size: qubit[n], qint[n], etc.
+                size_expr = self._parse_expression()
+                if isinstance(size_expr, LiteralExpr):
+                    try:
+                        size = int(size_expr.value)
+                    except (ValueError, TypeError):
+                        pass
             self._consume(TokenType.RBRACKET, "Expected ']' after size")
         
         # Parse the name first
@@ -218,7 +241,7 @@ class Parser:
         
         self._match(TokenType.SEMICOLON)  # Optional semicolon
         
-        return QuantumDecl(kind, size, name, value)
+        return QuantumDecl(kind, size, name, value, size2)
     
     def _parse_for(self) -> ForStmt:
         """Parse for loop"""
@@ -380,9 +403,23 @@ class Parser:
                 modifiers = []  # Reset after call
                 ctrl_count = None
             elif self._match(TokenType.LBRACKET):
-                index = self._parse_expression()
-                self._consume(TokenType.RBRACKET, "Expected ']' after index")
-                expr = IndexExpr(expr, index)
+                first = self._parse_expression()
+                if self._match(TokenType.COLON):
+                    # Slice: q[start:end] or q[start:step:end]
+                    second = self._parse_expression()
+                    if self._match(TokenType.COLON):
+                        # q[start:step:end] -> start=first, step=second, end=third
+                        third = self._parse_expression()
+                        self._consume(TokenType.RBRACKET, "Expected ']' after slice")
+                        expr = SliceExpr(expr, first, third, second)  # base, start, end, step
+                    else:
+                        # q[start:end] -> start=first, end=second, step=1
+                        self._consume(TokenType.RBRACKET, "Expected ']' after slice")
+                        expr = SliceExpr(expr, first, second, None)
+                else:
+                    # Single index: q[i]
+                    self._consume(TokenType.RBRACKET, "Expected ']' after index")
+                    expr = IndexExpr(expr, first)
             else:
                 break
         
@@ -461,7 +498,7 @@ class Parser:
         """Check if current token is a type"""
         return self._check(TokenType.INT, TokenType.FLOAT, TokenType.BOOL, TokenType.STR, 
                           TokenType.LIST, TokenType.DICT, TokenType.VAR, TokenType.QINT, TokenType.BINT,
-                          TokenType.QUBIT, TokenType.BIT)
+                          TokenType.QUBIT, TokenType.BIT, TokenType.QDEC, TokenType.QFLOAT)
     
     def _match(self, *types: TokenType) -> bool:
         """Match and consume if any type matches"""

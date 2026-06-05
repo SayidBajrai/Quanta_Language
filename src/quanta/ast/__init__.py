@@ -19,6 +19,7 @@ __all__ = [
     "ExprStmt",
     "CallExpr",
     "IndexExpr",
+    "SliceExpr",
     "BinaryExpr",
     "UnaryExpr",
     "VarExpr",
