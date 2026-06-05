@@ -4,16 +4,17 @@ Public API for Quanta compiler
 
 from typing import Dict, Any, Optional
 from .compiler import Compiler
-from .runtime.qiskit import run_circuit
-from .runtime import frontend_sim
 
 
-def compile(source: str) -> str:
+def compile(source: str, keep_structure: bool = False) -> str:
     """
     Compile Quanta source code to OpenQASM 3.
     
     Args:
         source: Quanta source code as a string
+        keep_structure: When True, emit structured OpenQASM with ``def``/``gate``
+            definitions and preserved control flow instead of fully flattening
+            arithmetic and discarding function structure.
         
     Returns:
         OpenQASM 3 code as a string
@@ -22,7 +23,7 @@ def compile(source: str) -> str:
         QuantaError: If compilation fails
     """
     compiler = Compiler()
-    return compiler.compile(source)
+    return compiler.compile(source, keep_structure=keep_structure)
 
 
 def run(source: str, shots: int = 1024, backend: Optional[str] = None) -> Dict[str, Any]:
@@ -37,6 +38,8 @@ def run(source: str, shots: int = 1024, backend: Optional[str] = None) -> Dict[s
     Returns:
         Dictionary with measurement results
     """
+    from .runtime.qiskit import run_circuit
+
     qasm = compile(source)
     return run_circuit(qasm, shots=shots, backend=backend)
 
@@ -54,10 +57,12 @@ def get_prints(quanta_code: str) -> str:
     - Entangled subsystems: full state is shown with a note.
 
     Raises:
-        RuntimeError: If total qubits > 20 (simulation limit).
+        RuntimeError: If total qbits > 20 (simulation limit).
         QuantaError: On parse/semantic errors.
 
     Returns:
         Terminal output as a single string (lines joined by newline).
     """
+    from .runtime import frontend_sim
+
     return frontend_sim.get_prints(quanta_code)

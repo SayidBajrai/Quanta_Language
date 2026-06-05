@@ -6,7 +6,9 @@ See the main [Quanta Language Syntax Specification](../Quanta%20Language%20Synta
 
 ### Types
 - Primitive: `int`, `float`, `bool`, `str`, `list`, `dict`
-- Quantum: `qubit`, `bit`, `qubit[n]`, `bit[n]`
+- Quantum: `qbit`, `bit`, `qbit[n]`, `bit[n]`, `qdec[int_bits, frac_bits]`, `qfloat[ebits, mbits]`
+- Tensors: `int[n][m]`, `float[n][m]`, `qbit[2][2]`
+- Structured compile: `compile(source, keep_structure=True)`
 
 ### Gate Calls
 ```quanta

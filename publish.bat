@@ -157,6 +157,9 @@ if !UPLOAD_ERROR! neq 0 (
         echo.
         echo.
         echo Would you like to bump the version and retry?
+        echo.
+        echo.
+        echo.
         echo   1. Bump patch version (0.1.0 -^> 0.1.1)
         echo   2. Bump minor version (0.1.0 -^> 0.2.0)
         echo   3. Bump major version (0.1.0 -^> 1.0.0)

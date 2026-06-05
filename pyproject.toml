@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quanta-lang"
-version = "0.1.12"
+version = "0.1.14"
 description = "Quanta: A high-level language that compiles to OpenQASM 3"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -43,10 +43,10 @@ dev = [
 quanta = "quanta.cli.main:main"
 
 [project.urls]
-Homepage = "https://github.com/quanta-lang/quanta"
-Documentation = "https://github.com/quanta-lang/quanta/docs"
-Repository = "https://github.com/quanta-lang/quanta"
-Issues = "https://github.com/quanta-lang/quanta/issues"
+Homepage = "https://github.com/SayidBajrai/Quanta_Language"
+Documentation = "https://github.com/SayidBajrai/Quanta_Language/tree/master/docs"
+Repository = "https://github.com/SayidBajrai/Quanta_Language.git"
+Issues = "https://github.com/SayidBajrai/Quanta_Language/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -57,4 +57,4 @@ target-version = ['py310']
 
 [tool.ruff]
 line-length = 100
-target-version = "0.1.12"
+target-version = "0.1.14"

@@ -6,8 +6,8 @@ from typing import List, Dict, Optional, Tuple
 from ..ast.nodes import (
     Program, Stmt, Expr,
     VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
-    ForStmt, IfStmt, ReturnStmt, ExprStmt,
-    CallExpr, IndexExpr, SliceExpr, BinaryExpr, UnaryExpr,
+    ForStmt, WhileStmt, IfStmt, ReturnStmt, ExprStmt,
+    CallExpr, IndexExpr, SingleIndex, SliceIndex, BinaryExpr, UnaryExpr,
     VarExpr, LiteralExpr, ListExpr, GroupExpr, AssignExpr,
     Node
 )
@@ -29,6 +29,9 @@ GATE_MAP: Dict[str, str] = {
     "RY": "ry",
     "RX": "rx",
     "Measure": "measure",
+    "S": "s",
+    "CCX": "ccx",
+    "CCNot": "ccx",
 }
 
 # Quantum arithmetic operations (will be lowered to QASM circuits)
@@ -102,9 +105,9 @@ class QASM3Generator(Visitor):
             size = node.size or 1
         self.registers[node.name] = (node.kind, size)
         
-        # Map qint/bint/qdec/qfloat to qubit/bit for QASM output
+        # Map qbit/qint/qdec/qfloat to qubit and bint to bit for QASM output
         qasm_kind = node.kind
-        if qasm_kind in ("qint", "qdec", "qfloat"):
+        if qasm_kind in ("qbit", "qint", "qdec", "qfloat"):
             qasm_kind = "qubit"
         elif qasm_kind == "bint":
             qasm_kind = "bit"
@@ -182,6 +185,10 @@ class QASM3Generator(Visitor):
     def visit_class_decl(self, node: ClassDecl) -> None:
         """Class declarations don't generate QASM"""
         pass
+
+    def visit_while_stmt(self, node: WhileStmt) -> None:
+        """While loops require structured compilation mode."""
+        pass
     
     def visit_for_stmt(self, node: ForStmt) -> None:
         """For loops must be unrolled before codegen"""
@@ -225,6 +232,26 @@ class QASM3Generator(Visitor):
                 self._handle_quantum_arithmetic(name, node.args)
                 return
             
+            if name in ("print", "Print"):
+                return
+            elif name == "Fidelity":
+                return
+            elif name == "Reshape":
+                return
+            elif name in (
+                "DotProduct",
+                "CrossProduct",
+                "ElementwiseProduct",
+                "TensorProduct",
+                "Shape",
+            ):
+                return
+
+            # User-defined gates take precedence over built-in high-level gates
+            if name in self.gates:
+                self._generate_gate_call(name, node.args, node.modifiers, node.ctrl_count)
+                return
+
             # Handle high-level quantum gates (support whole register and slice)
             if name in HIGH_LEVEL_GATES:
                 # Register-wise Bell/GHZ: all args same-size registers -> apply per index
@@ -240,7 +267,7 @@ class QASM3Generator(Visitor):
                     self._handle_high_level_gate(name, expanded, node.modifiers, node.ctrl_count)
                 return
             
-            # Handle Measure(q, c): single qubit or full registers (replaces MeasureAll)
+            # Handle Measure(q, c): single qubit or full registers
             if name == "Measure" and len(node.args) == 2:
                 if isinstance(node.args[0], VarExpr) and isinstance(node.args[1], VarExpr):
                     q_name = node.args[0].name
@@ -248,7 +275,7 @@ class QASM3Generator(Visitor):
                     if q_name in self.registers and c_name in self.registers:
                         q_kind, q_size = self.registers[q_name]
                         c_kind, c_size = self.registers[c_name]
-                        if q_kind in ("qubit", "qint", "qdec", "qfloat") and c_kind in ("bit", "bint"):
+                        if q_kind in ("qbit", "qint", "qdec", "qfloat") and c_kind in ("bit", "bint"):
                             size = min(q_size, c_size)
                             for i in range(size):
                                 self.lines.append(f"measure {q_name}[{i}] -> {c_name}[{i}];")
@@ -258,20 +285,12 @@ class QASM3Generator(Visitor):
                 c_str = self._expr_to_qasm(node.args[1])
                 self.lines.append(f"measure {q_str} -> {c_str};")
                 return
-            elif name == "print":
-                # Print is frontend-only, doesn't generate QASM
-                return
             elif name in ["len", "range", "assert", "error", "warn"]:
                 # These are compile-time or frontend-only
                 return
             elif name == "reset" and len(node.args) == 1:
                 q = self._expr_to_qasm(node.args[0])
                 self.lines.append(f"reset {q};")
-                return
-            
-            # Handle user-defined gates - generate gate call instead of expanding
-            if name in self.gates:
-                self._generate_gate_call(name, node.args, node.modifiers, node.ctrl_count)
                 return
             
             # Handle built-in gates
@@ -319,25 +338,14 @@ class QASM3Generator(Visitor):
                 pass
     
     def visit_index_expr(self, node: IndexExpr) -> str:
-        """Generate index expression"""
+        """Generate index expression (single scalar index after desugaring)."""
         base = self.visit(node.base)
-        index = self.visit(node.index)
-        if isinstance(base, str) and isinstance(index, str):
+        if len(node.items) == 1 and isinstance(node.items[0], SingleIndex):
+            index = self.visit(node.items[0].expr)
             return f"{base}[{index}]"
-        return f"{base}[{index}]"
-
-    def visit_slice_expr(self, node: SliceExpr) -> str:
-        """Slice is expanded elsewhere (high-level gates); here emit first index only if used standalone."""
-        start = self._eval_to_int(node.start)
-        end = self._eval_to_int(node.end)
-        step = self._eval_to_int(node.step) if node.step is not None else 1
-        if start is not None and end is not None and step is not None and step != 0:
-            indices = list(range(start, end, step))
-            if indices:
-                first = IndexExpr(node.base, LiteralExpr(indices[0]))
-                return self._expr_to_qasm(first)
-        base = self.visit(node.base)
-        return f"{base}[0]"
+        raise NotImplementedError(
+            "Multi-index register access must be desugared before code generation"
+        )
     
     def visit_binary_expr(self, node: BinaryExpr) -> str:
         """Binary expressions (for compile-time evaluation)"""
@@ -403,10 +411,20 @@ class QASM3Generator(Visitor):
             new_call.ctrl_count = expr.ctrl_count
             return new_call
         elif isinstance(expr, IndexExpr):
-            # Substitute in base and index
             new_base = self._substitute_params(expr.base, param_map)
-            new_index = self._substitute_params(expr.index, param_map)
-            return IndexExpr(new_base, new_index)
+            new_items = []
+            for item in expr.items:
+                if isinstance(item, SingleIndex):
+                    new_items.append(SingleIndex(self._substitute_params(item.expr, param_map)))
+                elif isinstance(item, SliceIndex):
+                    new_items.append(SliceIndex(
+                        self._substitute_params(item.start, param_map),
+                        self._substitute_params(item.stop, param_map),
+                        self._substitute_params(item.step, param_map) if item.step else None,
+                    ))
+                else:
+                    new_items.append(item)
+            return IndexExpr(new_base, new_items)
         elif isinstance(expr, BinaryExpr):
             new_left = self._substitute_params(expr.left, param_map)
             new_right = self._substitute_params(expr.right, param_map)
@@ -896,19 +914,14 @@ class QASM3Generator(Visitor):
             dest_reg = operand_strs[2]
             self._generate_shift_and_add_multiplier(a_reg, b_reg, dest_reg)
         else:
-            # Variadic case: chain multiplications
-            # For simplicity, handle two at a time
+            # Variadic case: chain multiplications into destination accumulator
             inputs = operand_strs[:-1]
             dest = operand_strs[-1]
-            
+
             if len(inputs) >= 2:
-                # Multiply first two, then multiply result with next, etc.
-                temp = dest
-                self._generate_shift_and_add_multiplier(inputs[0], inputs[1], temp)
-                
+                self._generate_shift_and_add_multiplier(inputs[0], inputs[1], dest)
                 for i in range(2, len(inputs)):
-                    # Multiply temp * inputs[i] into temp (would need new temp)
-                    self.lines.append(f"// Variadic multiplication: would multiply intermediate result with {inputs[i]}")
+                    self._generate_shift_and_add_multiplier(dest, inputs[i], dest)
     
     def _generate_shift_and_add_multiplier(self, a_reg: str, b_reg: str, result_reg: str):
         """
@@ -1540,19 +1553,19 @@ class QASM3Generator(Visitor):
                 if arg.name not in self.registers:
                     return None
                 kind, size = self.registers[arg.name]
-                if kind not in ("qubit", "qint", "qdec", "qfloat"):
+                if kind not in ("qbit", "qint", "qdec", "qfloat"):
                     return None
                 for i in range(size):
-                    result.append(IndexExpr(VarExpr(arg.name), LiteralExpr(i)))
-            elif isinstance(arg, SliceExpr):
-                # Slice: q[1:4] -> q[1], q[2], q[3] (Python-style, end exclusive)
-                start = self._eval_to_int(arg.start)
-                end = self._eval_to_int(arg.end)
-                step = self._eval_to_int(arg.step) if arg.step is not None else 1
+                    result.append(IndexExpr(VarExpr(arg.name), [SingleIndex(LiteralExpr(i))]))
+            elif isinstance(arg, IndexExpr) and len(arg.items) == 1 and isinstance(arg.items[0], SliceIndex):
+                slice_item = arg.items[0]
+                start = self._eval_to_int(slice_item.start)
+                end = self._eval_to_int(slice_item.stop)
+                step = self._eval_to_int(slice_item.step) if slice_item.step is not None else 1
                 if start is None or end is None or step is None or step == 0:
                     return None
                 for i in range(start, end, step):
-                    result.append(IndexExpr(arg.base, LiteralExpr(i)))
+                    result.append(IndexExpr(arg.base, [SingleIndex(LiteralExpr(i))]))
             elif isinstance(arg, IndexExpr):
                 result.append(arg)
             else:
@@ -1608,7 +1621,7 @@ class QASM3Generator(Visitor):
             if not isinstance(arg, VarExpr) or arg.name not in self.registers:
                 return None
             kind, n = self.registers[arg.name]
-            if kind not in ("qubit", "qint", "qdec", "qfloat"):
+            if kind not in ("qbit", "qint", "qdec", "qfloat"):
                 return None
             if size is None:
                 size = n
@@ -1789,6 +1802,8 @@ class QASM3Generator(Visitor):
             return self.visit_class_decl(node)
         elif isinstance(node, ForStmt):
             return self.visit_for_stmt(node)
+        elif isinstance(node, WhileStmt):
+            return self.visit_while_stmt(node)
         elif isinstance(node, IfStmt):
             return self.visit_if_stmt(node)
         elif isinstance(node, ReturnStmt):
@@ -1799,8 +1814,6 @@ class QASM3Generator(Visitor):
             return self.visit_call_expr(node)
         elif isinstance(node, IndexExpr):
             return self.visit_index_expr(node)
-        elif isinstance(node, SliceExpr):
-            return self.visit_slice_expr(node)
         elif isinstance(node, BinaryExpr):
             return self.visit_binary_expr(node)
         elif isinstance(node, UnaryExpr):

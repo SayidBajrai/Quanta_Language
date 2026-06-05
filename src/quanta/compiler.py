@@ -6,7 +6,9 @@ from .lexer.lexer import Lexer
 from .parser.parser import Parser
 from .sema.validation import SemanticAnalyzer
 from .sema.transform import ASTTransformer
+from .sema.indexing import IndexExpander, collect_registers
 from .lower.qasm3 import QASM3Generator
+from .lower.qasm3_structured import StructuredQASMGenerator
 from .errors import QuantaError, QuantaCompilationError
 
 
@@ -19,8 +21,9 @@ class Compiler:
         self.transformer = ASTTransformer()
         self.semantic_analyzer = SemanticAnalyzer()
         self.codegen = QASM3Generator()
+        self.structured_codegen = StructuredQASMGenerator()
     
-    def compile(self, source: str) -> str:
+    def compile(self, source: str, keep_structure: bool = False) -> str:
         """
         Compile Quanta source to OpenQASM 3.
         
@@ -42,10 +45,17 @@ class Compiler:
             ast = self.transformer.transform(ast)
             
             # Semantic analysis
-            self.semantic_analyzer.analyze(ast)
+            self.semantic_analyzer.analyze(ast, keep_structure=keep_structure)
+
+            # Desugar fancy indexing (q[0,2,5], q[0:4,7], etc.)
+            registers = collect_registers(ast)
+            ast = IndexExpander(registers).expand_program(ast)
             
             # Code generation
-            qasm = self.codegen.generate(ast)
+            if keep_structure:
+                qasm = self.structured_codegen.generate(ast)
+            else:
+                qasm = self.codegen.generate(ast)
             
             return qasm
         except Exception as e:

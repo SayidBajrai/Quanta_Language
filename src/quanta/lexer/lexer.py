@@ -17,9 +17,10 @@ class TokenType(Enum):
     CONST = "CONST"
     LET = "LET"
     GATE = "GATE"
-    QUBIT = "QUBIT"
+    QBIT = "QBIT"
     BIT = "BIT"
     FOR = "FOR"
+    WHILE = "WHILE"
     IF = "IF"
     ELSE = "ELSE"
     RETURN = "RETURN"
@@ -43,6 +44,7 @@ class TokenType(Enum):
     IDENT = "IDENT"
     NUMBER = "NUMBER"
     STRING = "STRING"
+    FSTRING = "FSTRING"
     BOOLEAN = "BOOLEAN"
     
     # Operators
@@ -60,6 +62,7 @@ class TokenType(Enum):
     STAR = "*"
     SLASH = "/"
     PERCENT = "%"
+    DOT = "."
     
     # Delimiters
     LBRACE = "{"
@@ -96,13 +99,14 @@ class Lexer:
         "const": TokenType.CONST,
         "let": TokenType.LET,
         "gate": TokenType.GATE,
-        "qubit": TokenType.QUBIT,
+        "qbit": TokenType.QBIT,
         "bit": TokenType.BIT,
         "qint": TokenType.QINT,
         "bint": TokenType.BINT,
         "qdec": TokenType.QDEC,
         "qfloat": TokenType.QFLOAT,
         "for": TokenType.FOR,
+        "while": TokenType.WHILE,
         "if": TokenType.IF,
         "else": TokenType.ELSE,
         "return": TokenType.RETURN,
@@ -183,6 +187,10 @@ class Lexer:
             return self._make_token(TokenType.STAR, "*")
         elif char == "/":
             return self._make_token(TokenType.SLASH, "/")
+        elif char == ".":
+            if self._peek().isdigit():
+                return self._number(".")
+            return self._make_token(TokenType.DOT, ".")
         elif char == "%":
             return self._make_token(TokenType.PERCENT, "%")
         elif char == "=":
@@ -208,6 +216,9 @@ class Lexer:
                 return self._make_token(TokenType.OR, "||")
         elif char == "\n":
             return self._make_token(TokenType.NEWLINE, "\n")
+        elif char == "f" and self._peek() == '"':
+            self._advance()  # consume opening quote
+            return self._string(token_type=TokenType.FSTRING)
         elif char == '"':
             return self._string()
         elif char.isdigit():
@@ -217,24 +228,32 @@ class Lexer:
         
         return None
     
-    def _string(self) -> Token:
-        """Scan a string literal"""
+    def _string(self, token_type: TokenType = TokenType.STRING) -> Token:
+        """Scan a string or f-string literal."""
         start_line = self.line
         start_col = self.column - 1
         value = ""
-        
+
         while self._peek() != '"' and not self._is_at_end():
+            if self._peek() == "\\" and self._peek_next() == "{":
+                self._advance()
+                value += self._advance()
+                continue
+            if self._peek() == "\\" and self._peek_next() == "}":
+                self._advance()
+                value += self._advance()
+                continue
             if self._peek() == "\n":
                 self.line += 1
                 self.column = 0
             value += self._advance()
-        
+
         if self._is_at_end():
             from ..errors import QuantaSyntaxError
             raise QuantaSyntaxError("Unterminated string", start_line, start_col)
-        
+
         self._advance()  # Consume closing quote
-        return Token(TokenType.STRING, value, start_line, start_col)
+        return Token(token_type, value, start_line, start_col)
     
     def _number(self, first_char: str = "") -> Token:
         """Scan a number literal"""

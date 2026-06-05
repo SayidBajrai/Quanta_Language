@@ -6,12 +6,13 @@ from typing import List, Optional
 from ..lexer.lexer import Token, TokenType
 from ..ast.nodes import (
     Program, Stmt, Expr,
-    VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
-    ForStmt, IfStmt, ReturnStmt, ExprStmt,
-    CallExpr, IndexExpr, SliceExpr, BinaryExpr, UnaryExpr,
-    VarExpr, LiteralExpr, ListExpr, GroupExpr, AssignExpr,
+    VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl, ParamSpec,
+    ForStmt, WhileStmt, IfStmt, ReturnStmt, ExprStmt,
+    CallExpr, IndexExpr, IndexItem, SingleIndex, SliceIndex, SliceFull, BinaryExpr, UnaryExpr,
+    VarExpr, LiteralExpr, FStringExpr, FStringPart, ListExpr, GroupExpr, AssignExpr,
 )
 from ..errors import QuantaSyntaxError
+from ..types.tensor import TensorType
 
 
 class Parser:
@@ -63,11 +64,15 @@ class Parser:
             return self._parse_const_decl()
         elif self._match(TokenType.LET):
             return self._parse_let_decl()
-        elif (self._check(TokenType.QUBIT) or self._check(TokenType.BIT) or self._check(TokenType.QINT)
+        elif self._check(TokenType.FLOAT, TokenType.INT, TokenType.BOOL, TokenType.STR):
+            return self._parse_typed_var_decl()
+        elif (self._check(TokenType.QBIT) or self._check(TokenType.BIT) or self._check(TokenType.QINT)
               or self._check(TokenType.BINT) or self._check(TokenType.QDEC) or self._check(TokenType.QFLOAT)):
             return self._parse_quantum_decl()
         elif self._match(TokenType.FOR):
             return self._parse_for()
+        elif self._match(TokenType.WHILE):
+            return self._parse_while()
         elif self._match(TokenType.IF):
             return self._parse_if()
         elif self._match(TokenType.RETURN):
@@ -81,26 +86,76 @@ class Parser:
                 return ExprStmt(expr)
         return None
     
+    def _parse_quantum_kind_token(self) -> str:
+        """Parse qbit/bit/qint/bint/qdec/qfloat keyword into kind string."""
+        kind_token = self._advance()
+        if kind_token.type == TokenType.QBIT:
+            return "qbit"
+        if kind_token.type == TokenType.BIT:
+            return "bit"
+        if kind_token.type == TokenType.QINT:
+            return "qint"
+        if kind_token.type == TokenType.BINT:
+            return "bint"
+        if kind_token.type == TokenType.QDEC:
+            return "qdec"
+        if kind_token.type == TokenType.QFLOAT:
+            return "qfloat"
+        return "qbit"
+
+    def _parse_quantum_type_prefix(self) -> tuple:
+        """Parse a quantum type prefix such as qbit[2] or bit."""
+        kind = self._parse_quantum_kind_token()
+        shape = self._parse_tensor_dimensions()
+        size = None
+        if shape:
+            if all(d is not None for d in shape):
+                size = 1
+                for dim in shape:
+                    size *= dim  # type: ignore[operator]
+            elif len(shape) == 1 and shape[0] is not None:
+                size = shape[0]
+        if size is None:
+            size = 1
+        return kind, size, shape or [1]
+
+    def _parse_param_spec(self) -> ParamSpec:
+        """Parse a function parameter, optionally typed."""
+        if self._check(TokenType.QBIT, TokenType.BIT, TokenType.QINT, TokenType.BINT):
+            kind, size, shape = self._parse_quantum_type_prefix()
+            name = self._consume(TokenType.IDENT, "Expected parameter name").value
+            return ParamSpec(kind, name, size, shape)
+        name = self._consume(TokenType.IDENT, "Expected parameter name").value
+        return ParamSpec("qbit", name)
+
     def _parse_function(self) -> FuncDecl:
-        """Parse function declaration"""
-        name = self._consume(TokenType.IDENT, "Expected function name").value
-        
-        # Parse return type if present
+        """Parse function declaration: func [type] name(params) { ... }"""
         return_type = None
-        if self._check_type():
+        return_kind = None
+        return_size = None
+
+        if self._match(TokenType.VAR):
+            return_type = "var"
+        elif self._check(TokenType.QBIT, TokenType.BIT, TokenType.QINT, TokenType.BINT):
+            return_kind, return_size, _ = self._parse_quantum_type_prefix()
+            return_type = return_kind
+        elif self._check_type():
             return_type = self._advance().value
-        
-        # Parse parameters
+
+        name = self._consume(TokenType.IDENT, "Expected function name").value
+
         self._consume(TokenType.LPAREN, "Expected '(' after function name")
-        params = []
+        params: List[str] = []
+        param_specs: List[ParamSpec] = []
         if not self._check(TokenType.RPAREN):
             while True:
-                params.append(self._consume(TokenType.IDENT, "Expected parameter name").value)
+                pspec = self._parse_param_spec()
+                param_specs.append(pspec)
+                params.append(pspec.name)
                 if not self._match(TokenType.COMMA):
                     break
         self._consume(TokenType.RPAREN, "Expected ')' after parameters")
-        
-        # Parse body
+
         self._consume(TokenType.LBRACE, "Expected '{' before function body")
         body = []
         while not self._check(TokenType.RBRACE) and not self._is_at_end():
@@ -108,8 +163,16 @@ class Parser:
             if stmt:
                 body.append(stmt)
         self._consume(TokenType.RBRACE, "Expected '}' after function body")
-        
-        return FuncDecl(name, params, return_type, body)
+
+        return FuncDecl(
+            name,
+            params,
+            return_type,
+            body,
+            param_specs=param_specs,
+            return_kind=return_kind,
+            return_size=return_size,
+        )
     
     def _parse_gate(self) -> GateDecl:
         """Parse gate macro declaration"""
@@ -153,13 +216,50 @@ class Parser:
         self._consume(TokenType.RBRACE, "Expected '}' after class body")
         return ClassDecl(name, members)
     
+    def _parse_tensor_dimensions(self) -> List[Optional[int]]:
+        """Parse repeated [n] or [] dimension suffixes on a type."""
+        dims: List[Optional[int]] = []
+        while self._match(TokenType.LBRACKET):
+            if self._check(TokenType.RBRACKET):
+                self._advance()
+                dims.append(None)
+            else:
+                size_expr = self._parse_expression()
+                dim: Optional[int] = None
+                if isinstance(size_expr, LiteralExpr):
+                    try:
+                        dim = int(size_expr.value)
+                    except (ValueError, TypeError):
+                        dim = None
+                dims.append(dim)
+                self._consume(TokenType.RBRACKET, "Expected ']' after tensor dimension")
+        return dims
+
+    def _parse_type_annotation(self) -> TensorType:
+        """Parse a full tensor type annotation such as float[3][4] or int[][]."""
+        base = self._advance().value
+        dims = self._parse_tensor_dimensions()
+        return TensorType(base, tuple(dims))
+
+    def _parse_typed_var_decl(self) -> VarDecl:
+        """Parse typed variable declaration (e.g. float x = expr)."""
+        tensor_type = self._parse_type_annotation()
+        name = self._consume(TokenType.IDENT, "Expected variable name").value
+        value = None
+        if self._match(TokenType.EQ):
+            value = self._parse_expression()
+        self._match(TokenType.SEMICOLON)
+        return VarDecl(name, tensor_type.format(), value, tensor_type)
+
     def _parse_var_decl(self) -> VarDecl:
         """Parse variable declaration"""
         name = self._consume(TokenType.IDENT, "Expected variable name").value
         
+        tensor_type = None
         type_hint = None
         if self._check_type():
-            type_hint = self._advance().value
+            tensor_type = self._parse_type_annotation()
+            type_hint = tensor_type.format()
         
         value = None
         if self._match(TokenType.EQ):
@@ -167,7 +267,7 @@ class Parser:
         
         # Semicolon is optional
         self._match(TokenType.SEMICOLON)
-        return VarDecl(name, type_hint, value)
+        return VarDecl(name, type_hint, value, tensor_type)
     
     def _parse_const_decl(self) -> ConstDecl:
         """Parse constant declaration"""
@@ -188,8 +288,8 @@ class Parser:
     def _parse_quantum_decl(self) -> QuantumDecl:
         """Parse quantum register declaration"""
         kind_token = self._advance()
-        if kind_token.type == TokenType.QUBIT:
-            kind = "qubit"
+        if kind_token.type == TokenType.QBIT:
+            kind = "qbit"
         elif kind_token.type == TokenType.BIT:
             kind = "bit"
         elif kind_token.type == TokenType.QINT:
@@ -201,13 +301,14 @@ class Parser:
         elif kind_token.type == TokenType.QFLOAT:
             kind = "qfloat"
         else:
-            kind = "qubit"  # Default
-        
+            kind = "qbit"  # Default
+
+        shape: List[Optional[int]] = []
         size = None
         size2 = None
+
         if self._match(TokenType.LBRACKET):
             if kind in ("qdec", "qfloat"):
-                # Two-argument form: qdec[int_bits, frac_bits] or qfloat[ebits, mbits]
                 size_expr = self._parse_expression()
                 if isinstance(size_expr, LiteralExpr):
                     try:
@@ -221,17 +322,50 @@ class Parser:
                         size2 = int(size2_expr.value)
                     except (ValueError, TypeError):
                         pass
+                shape = [size, size2]
+                self._consume(TokenType.RBRACKET, "Expected ']' after size")
             else:
-                # Single size: qubit[n], qint[n], etc.
-                size_expr = self._parse_expression()
-                if isinstance(size_expr, LiteralExpr):
-                    try:
-                        size = int(size_expr.value)
-                    except (ValueError, TypeError):
-                        pass
-            self._consume(TokenType.RBRACKET, "Expected ']' after size")
-        
-        # Parse the name first
+                if self._check(TokenType.RBRACKET):
+                    self._advance()
+                    shape = [None]
+                else:
+                    size_expr = self._parse_expression()
+                    dim: Optional[int] = None
+                    if isinstance(size_expr, LiteralExpr):
+                        try:
+                            dim = int(size_expr.value)
+                        except (ValueError, TypeError):
+                            dim = None
+                    shape = [dim]
+                    self._consume(TokenType.RBRACKET, "Expected ']' after size")
+                while self._match(TokenType.LBRACKET):
+                    if self._check(TokenType.RBRACKET):
+                        self._advance()
+                        shape.append(None)
+                    else:
+                        size_expr = self._parse_expression()
+                        dim = None
+                        if isinstance(size_expr, LiteralExpr):
+                            try:
+                                dim = int(size_expr.value)
+                            except (ValueError, TypeError):
+                                dim = None
+                        shape.append(dim)
+                        self._consume(TokenType.RBRACKET, "Expected ']' after tensor dimension")
+                if shape:
+                    if all(d is not None for d in shape):
+                        size = 1
+                        for dim in shape:
+                            size *= dim  # type: ignore[operator]
+                    elif len(shape) == 1 and shape[0] is not None:
+                        size = shape[0]
+        else:
+            shape = [1]
+
+        tensor_type = None
+        if kind not in ("qdec", "qfloat"):
+            tensor_type = TensorType.from_quantum(kind, tuple(shape)) if shape else TensorType.from_quantum(kind, (1,))
+
         name = self._consume(TokenType.IDENT, "Expected register name").value
         
         # Check for initialization value after the name
@@ -241,7 +375,12 @@ class Parser:
         
         self._match(TokenType.SEMICOLON)  # Optional semicolon
         
-        return QuantumDecl(kind, size, name, value, size2)
+        return QuantumDecl(
+            kind, size, name, value,
+            shape=shape or [1],
+            tensor_type=tensor_type,
+            size2=size2,
+        )
     
     def _parse_for(self) -> ForStmt:
         """Parse for loop"""
@@ -260,6 +399,25 @@ class Parser:
         self._consume(TokenType.RBRACE, "Expected '}' after for body")
         
         return ForStmt(iterator, iterable, body)
+
+    def _parse_while(self) -> WhileStmt:
+        """Parse while loop (braces optional for single-statement body)."""
+        self._consume(TokenType.LPAREN, "Expected '(' after 'while'")
+        condition = self._parse_expression()
+        self._consume(TokenType.RPAREN, "Expected ')' after while condition")
+
+        if self._match(TokenType.LBRACE):
+            body: List[Stmt] = []
+            while not self._check(TokenType.RBRACE) and not self._is_at_end():
+                stmt = self._parse_statement()
+                if stmt:
+                    body.append(stmt)
+            self._consume(TokenType.RBRACE, "Expected '}' after while body")
+        else:
+            stmt = self._parse_statement()
+            body = [stmt] if stmt else []
+
+        return WhileStmt(condition, body)
     
     def _parse_if(self) -> IfStmt:
         """Parse if statement"""
@@ -360,11 +518,19 @@ class Parser:
     
     def _parse_factor(self) -> Expr:
         """Parse multiplication/division"""
-        expr = self._parse_unary()
+        expr = self._parse_dot()
         while self._match(TokenType.STAR, TokenType.SLASH, TokenType.PERCENT):
             op = self._previous().value
-            right = self._parse_unary()
+            right = self._parse_dot()
             expr = BinaryExpr(expr, op, right)
+        return expr
+
+    def _parse_dot(self) -> Expr:
+        """Parse dot product (a . b)"""
+        expr = self._parse_unary()
+        while self._match(TokenType.DOT):
+            right = self._parse_unary()
+            expr = CallExpr(VarExpr("DotProduct"), [expr, right])
         return expr
     
     def _parse_unary(self) -> Expr:
@@ -403,23 +569,9 @@ class Parser:
                 modifiers = []  # Reset after call
                 ctrl_count = None
             elif self._match(TokenType.LBRACKET):
-                first = self._parse_expression()
-                if self._match(TokenType.COLON):
-                    # Slice: q[start:end] or q[start:step:end]
-                    second = self._parse_expression()
-                    if self._match(TokenType.COLON):
-                        # q[start:step:end] -> start=first, step=second, end=third
-                        third = self._parse_expression()
-                        self._consume(TokenType.RBRACKET, "Expected ']' after slice")
-                        expr = SliceExpr(expr, first, third, second)  # base, start, end, step
-                    else:
-                        # q[start:end] -> start=first, end=second, step=1
-                        self._consume(TokenType.RBRACKET, "Expected ']' after slice")
-                        expr = SliceExpr(expr, first, second, None)
-                else:
-                    # Single index: q[i]
-                    self._consume(TokenType.RBRACKET, "Expected ']' after index")
-                    expr = IndexExpr(expr, first)
+                items = self._parse_index_selection()
+                self._consume(TokenType.RBRACKET, "Expected ']' after index")
+                expr = IndexExpr(expr, items)
             else:
                 break
         
@@ -443,12 +595,18 @@ class Parser:
             self._advance()
         if self._match(TokenType.NUMBER):
             return LiteralExpr(self._previous().value)
+        if self._match(TokenType.FSTRING):
+            return self._parse_fstring(self._previous().value)
         if self._match(TokenType.STRING):
             return LiteralExpr(self._previous().value)
         if self._match(TokenType.BOOLEAN):
             return LiteralExpr(self._previous().value)
         if self._match(TokenType.IDENT):
             return VarExpr(self._previous().value)
+        if self._check(TokenType.INT) and self._check_next(TokenType.LPAREN):
+            name = self._advance().value
+            self._consume(TokenType.LPAREN, "Expected '(' after int")
+            return self._finish_call(VarExpr(name), [], None)
         if self._match(TokenType.LPAREN):
             expr = self._parse_expression()
             self._consume(TokenType.RPAREN, "Expected ')' after expression")
@@ -458,6 +616,99 @@ class Parser:
         
         raise QuantaSyntaxError(f"Unexpected token: {self._peek().value}", self._peek().line, self._peek().column)
     
+    def _parse_fstring(self, template: str) -> FStringExpr:
+        """Parse an f-string template into literal and interpolated parts."""
+        parts: List[FStringPart] = []
+        i = 0
+        literal_start = 0
+        while i < len(template):
+            ch = template[i]
+            if ch == "{" and i + 1 < len(template) and template[i + 1] == "{":
+                if literal_start < i:
+                    parts.append(FStringPart(literal=template[literal_start:i] + "{"))
+                i += 2
+                literal_start = i
+                continue
+            if ch == "}" and i + 1 < len(template) and template[i + 1] == "}":
+                if literal_start < i:
+                    parts.append(FStringPart(literal=template[literal_start:i] + "}"))
+                i += 2
+                literal_start = i
+                continue
+            if ch == "{":
+                if literal_start < i:
+                    parts.append(FStringPart(literal=template[literal_start:i]))
+                end = template.find("}", i + 1)
+                if end == -1:
+                    raise QuantaSyntaxError("Unterminated f-string expression")
+                inner = template[i + 1:end]
+                if ":" in inner:
+                    expr_src, specifier = inner.split(":", 1)
+                    specifier = specifier.strip() or None
+                else:
+                    expr_src, specifier = inner, None
+                expr = self._parse_embedded_expression(expr_src.strip())
+                parts.append(FStringPart(expr=expr, specifier=specifier))
+                i = end + 1
+                literal_start = i
+                continue
+            i += 1
+        if literal_start < len(template):
+            parts.append(FStringPart(literal=template[literal_start:]))
+        if not parts:
+            parts.append(FStringPart(literal=""))
+        return FStringExpr(parts)
+
+    def _parse_embedded_expression(self, source: str) -> Expr:
+        """Parse a single expression embedded inside an f-string."""
+        if not source:
+            raise QuantaSyntaxError("Empty f-string expression")
+        from ..lexer.lexer import Lexer
+
+        lexer = Lexer()
+        tokens = lexer.tokenize(source)
+        subparser = Parser()
+        subparser.tokens = tokens
+        subparser.current = 0
+        return subparser._parse_expression()
+
+    def _parse_index_item(self) -> IndexItem:
+        """Parse one index item: i, :, i:j, i:j:k, or :j or ::k."""
+        if self._check(TokenType.COLON):
+            self._advance()
+            if self._check(TokenType.RBRACKET) or self._check(TokenType.COMMA):
+                return SliceFull()
+            if self._match(TokenType.COLON):
+                step = self._parse_expression()
+                if self._match(TokenType.COLON):
+                    end = self._parse_expression()
+                    return SliceIndex(LiteralExpr("0"), end, step)
+                return SliceIndex(LiteralExpr("0"), LiteralExpr("0"), step)
+            end = self._parse_expression()
+            if self._match(TokenType.COLON):
+                step = self._parse_expression()
+                return SliceIndex(LiteralExpr("0"), end, step)
+            return SliceIndex(LiteralExpr("0"), end, LiteralExpr("1"))
+
+        first = self._parse_expression()
+        if self._match(TokenType.COLON):
+            if self._check(TokenType.COLON):
+                self._advance()
+                step = self._parse_expression()
+                self._consume(TokenType.COLON, "Expected ':' before end in slice")
+                end = self._parse_expression()
+                return SliceIndex(first, end, step)
+            end = self._parse_expression()
+            return SliceIndex(first, end, LiteralExpr("1"))
+        return SingleIndex(first)
+
+    def _parse_index_selection(self) -> List[IndexItem]:
+        """Parse comma-separated index selection inside brackets."""
+        items = [self._parse_index_item()]
+        while self._match(TokenType.COMMA):
+            items.append(self._parse_index_item())
+        return items
+
     def _parse_list(self) -> ListExpr:
         """Parse list literal (including range syntax [start:end] or [start:step:end])"""
         # Check if empty list
@@ -485,7 +736,7 @@ class Parser:
                 elements = [first, step, end]  # Will be expanded at compile time
             
             self._consume(TokenType.RBRACKET, "Expected ']' after range")
-            return ListExpr(elements)
+            return ListExpr(elements, is_range_syntax=True)
         else:
             # Regular list
             elements = [first]
@@ -498,7 +749,7 @@ class Parser:
         """Check if current token is a type"""
         return self._check(TokenType.INT, TokenType.FLOAT, TokenType.BOOL, TokenType.STR, 
                           TokenType.LIST, TokenType.DICT, TokenType.VAR, TokenType.QINT, TokenType.BINT,
-                          TokenType.QUBIT, TokenType.BIT, TokenType.QDEC, TokenType.QFLOAT)
+                          TokenType.QBIT, TokenType.BIT, TokenType.QDEC, TokenType.QFLOAT)
     
     def _match(self, *types: TokenType) -> bool:
         """Match and consume if any type matches"""
@@ -529,6 +780,12 @@ class Parser:
     def _peek(self) -> Token:
         """Peek at current token"""
         return self.tokens[self.current]
+
+    def _check_next(self, *types: TokenType) -> bool:
+        """Check if the next token matches any of the given types."""
+        if self.current + 1 >= len(self.tokens):
+            return False
+        return self.tokens[self.current + 1].type in types
     
     def _previous(self) -> Token:
         """Get previous token"""

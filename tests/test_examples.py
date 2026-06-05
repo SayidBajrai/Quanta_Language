@@ -9,7 +9,7 @@ from quanta import compile
 def test_quantum_register_declaration():
     """Test quantum register declarations"""
     source = """
-qubit[2] q;
+qbit[2] q;
 bit[2] c;
 """
     qasm = compile(source)
@@ -21,7 +21,7 @@ bit[2] c;
 def test_measurement():
     """Test measurement operations"""
     source = """
-qubit[1] q;
+qbit[1] q;
 bit[1] c;
 Measure(q[0], c[0]);
 """

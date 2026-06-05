@@ -28,7 +28,7 @@ from quanta import compile, run, get_prints
 
 # Compile Quanta source to OpenQASM 3
 source = """
-qubit[2] q
+qbit[2] q
 bit[2] c
 
 gate Bellgate(a, b) {
@@ -48,7 +48,7 @@ result = run(source, shots=1024)
 print(result)
 
 # Frontend debug: capture Print() output (statevector simulator only)
-debug_source = "qubit q\nH(q)\nprint(q)"
+debug_source = "qbit q\nH(q)\nprint(q)"
 terminal = get_prints(debug_source)
 print(terminal)  # e.g. "1/sqrt(2) * |0> + 1/sqrt(2) * |1>"
 ```
@@ -72,7 +72,7 @@ quanta check example.qta
 
 ```quanta
 // Bell state example
-qubit[2] q
+qbit[2] q
 bit[2] c
 
 gate Bellgate(a, b) {
@@ -104,17 +104,25 @@ measure q[1] -> c[1];
 
 ## Language Features
 
-- **Types**: `int`, `float`, `bool`, `str`, `list`, `dict`, `qubit`, `bit`, `qint[n]`, `bint[n]`, `qdec[int_bits, frac_bits]`, `qfloat[ebits, mbits]`
+- **Types**: `int`, `float`, `bool`, `str`, `list`, `dict`, `qbit`, `bit`, `qint[n]` / `qint[]`, `bint[n]`, `qdec[int_bits, frac_bits]`, `qfloat[ebits, mbits]`
 - **Gate Macros**: `gate` keyword for compile-time circuit composition
 - **Modifiers**: `ctrl` and `inv` (dagger) modifiers for gates, and `reset` for qubits
 - **Functions**: Compile-time inlined for quantum operations
-- **Control Flow**: `for` loops (unrolled), `if/else` (classical only)
+- **Control Flow**: `for` loops (unrolled), `while` loops (structured mode), `if/else` (classical only)
+- **Indexing**: Multi-dimensional fancy indexing (`q[0,2,5]`, `q[0:4,7]`)
+- **Tensor Types**: N-dimensional classical and quantum tensors (`int[n][m]`, `float[3][3]`, `qbit[2][2]`)
+- **Tensor Algebra**: `DotProduct`, `CrossProduct`, `ElementwiseProduct`, `TensorProduct`, `Shape`, `Reshape`; dot operator `a . b` (frontend / classical only)
+- **Structured Compilation**: `compile(source, keep_structure=True)` preserves `def`/`gate` and control flow
+- **Print Formatting**: f-string specifiers for symbolic states, probabilities, entropy, Bloch vectors, circuit trace
+- **Metrics**: `Fidelity()` builtin (frontend simulation only)
 - **Gate Set**: `H`, `X`, `CNot`, `CZ`, `Swap`, `RZ`, `Measure`, and more
 - **High-Level Gates**: `Bell`, `GHZ`, `WState`, `SwapGate`, `QFT`, `InverseQFT`
-- **Quantum Arithmetic**: `QAdd`, `QMult`, `Compare`, `Grover`; operator overloading `+` and `*` on `qint`; fixed-point (`qdec`) and floating-point (`qfloat`) registers
+- **Quantum Arithmetic**: `QAdd`, `QMult`, `Compare`, `Grover`; operator overloading (`+`, `-`, `*`, `/`, `%`) on `qint`; `qint[]` size inference; classical constants in expressions; fixed-point (`qdec`) and floating-point (`qfloat`) registers
 - **Standard Library**: `Print()`, `Len()`, `Measure()`, `Assert()`, `Range()`
 - **Constants**: Built-in `pi`, `e`, and user-defined `const` declarations
-- **API**: `compile(source)`, `run(source, shots=...)`, `get_prints(source)` (frontend debug, simulator only)
+- **API**: `compile(source, keep_structure=False)`, `run(source, shots=...)`, `get_prints(source)` (frontend debug, simulator only)
+
+> OpenQASM 3 output uses the standard keyword `qubit` (Quanta source uses `qbit`).
 
 ## Quanta Language Specification
 
@@ -151,9 +159,9 @@ int, float, bool, str, list, dict
 #### Quantum Types (QASM-Mapped)
 
 ```text
-qubit
+qbit
 bit
-qubit[n]
+qbit[n]
 bit[n]
 qint[n]    // Quantum integer (N qubits)
 bint[n]    // Classical bit integer (N classical bits)
@@ -214,17 +222,19 @@ q[qidx[1]]
 
 > Any array used in quantum operations **must be compile-time resolvable**.
 
-#### Register slicing (Python-style)
+#### Register slicing & fancy indexing (Python-style)
 
-Quantum registers support **slice** syntax like Python (start:end, end exclusive):
+Quantum registers and classical tensors support **slice** and **multi-index** syntax:
 
 ```quanta
-qubit[6] q
+qbit[6] q
 q[1:4]        // slice: qubits 1, 2, 3 (start:end, end exclusive)
 q[0:2:6]      // step 2: qubits 0, 2, 4 (start:step:end)
+q[0, 2, 5]    // fancy index: qubits 0, 2, and 5
+q[0:4, 7]     // mixed slice and scalar index
 ```
 
-Slices are **compile-time** (start, end, step must be constant expressions). They are used with high-level gates (e.g. `GHZ(q[1:4])`) and expand to the corresponding list of qubits.
+Slices are **compile-time** (start, end, step must be constant expressions). They are used with high-level gates (e.g. `GHZ(q[1:4])`) and expand to the corresponding list of qubits. Classical tensors use the same bracket syntax for row/column selection (see [Tensor Types & Algebra](#tensor-types--algebra-classical)).
 
 ### Dictionaries (Maps)
 
@@ -243,6 +253,57 @@ gates["control"]
 
 - Dictionaries are **frontend-only**
 - Must fully resolve before quantum lowering
+
+### Tensor Types & Algebra (Classical)
+
+Declare N-dimensional classical tensors with repeated `[n]` dimensions:
+
+```quanta
+float[3] x = [1.0, 2.0, 3.0]
+float[3][3] W = [[0.2, 0.4, 0.6], [0.1, 0.3, 0.5], [0.7, 0.8, 0.9]]
+```
+
+Index rows, columns, and slices (including full-dimension `:`):
+
+```quanta
+W[0, 0]       // scalar element
+W[0, :]       // row vector
+W[:, 1]       // column vector
+```
+
+#### Product operations
+
+| Operation | Syntax | Requirement | Result |
+|-----------|--------|-------------|--------|
+| Dot product | `a . b` or `DotProduct(a, b)` | Rank-1 vectors, equal length | Scalar |
+| Cross product | `CrossProduct(a, b)` | Two 3D vectors | 3-vector |
+| Elementwise (Hadamard) | `ElementwiseProduct(a, b)` or `A * B` on tensors | Identical shape | Same shape |
+| Tensor (Kronecker) product | `TensorProduct(a, b)` | Compatible tensors | Block-expanded tensor |
+
+```quanta
+float[3] a = [1.0, 2.0, 3.0]
+float[3] b = [4.0, 5.0, 6.0]
+float dot_ab = a . b                    // 32.0
+
+float[3] x = [1, 0, 1]
+float y0 = DotProduct(W[0, :], x)       // row–vector dot product
+
+float[2][2] A = [[1, 2], [3, 4]]
+float[2][2] B = [[0, 5], [6, 7]]
+float[4][4] kron = TensorProduct(A, B)
+print(Shape(kron))                      // (4, 4)
+```
+
+Helpers:
+
+- `Shape(tensor)` — returns the shape tuple, e.g. `(3, 3)`
+- `Reshape(tensor, d1, d2, ...)` — reshape in the frontend simulator
+
+📌 **Rules**
+
+- **Strict shapes** — mismatched shapes raise a semantic error (no implicit broadcasting)
+- **Types** — `int`, `float`, and `bool` tensors; bool `*` is logical AND
+- **Scope** — classical preprocessing in `get_prints()` / frontend sim; does **not** lower to OpenQASM
 
 ### Functions (Classical)
 
@@ -328,7 +389,7 @@ qint[3] q = 2    // Binary: 010, so |010⟩
 
 Generates:
 ```qasm
-qubit[3] q;
+qbit[3] q;
 x q[1];          // Set bit 1 (second bit) to |1⟩
 ```
 
@@ -369,7 +430,7 @@ qfloat[8, 23] x   // 32-bit style: 1 sign + 8 exponent + 23 mantissa
 | Real IEEE semantics (NaN, infinities, subnormals) | `qfloat[...]` |
 | Hardware-efficient arithmetic, minimal ancilla | `qdec[...]` |
 
-Both types lower to plain `qubit[n]` in OpenQASM 3; arithmetic and interpretation are left to libraries or future extensions.
+Both types lower to plain `qbit[n]` in OpenQASM 3; arithmetic and interpretation are left to libraries or future extensions.
 
 ### Quantum Arithmetic Operations
 
@@ -751,16 +812,26 @@ qint[4] diff = x - y - z   // Sugar for: QSub(x, y, z, diff)
 qint[3] r = (a + b) * c   // Compound expression with precedence
 qint[4] q = a / b         // Sugar for: QDiv(a, b, q, _remainder)
 qint[4] m = a % b         // Sugar for: QMod(a, b, m)
+
+qint[4] val = 3
+qint[4] sum = val + 5     // Classical constants in qint expressions
+qint[] out = val + sum    // Type required (qint[]); bit width inferred from operands
+qint[4] noop = val + 0    // Simplified: no full adder (identity)
+qint[4] zero = val * 0    // Simplified: direct zero initialization
 ```
 
 **Default Desugaring:**
-- `qint z = x + y` → `qint z; QAdd(x, y, z)` (uses ripple-carry adder)
+- `qint[] z = x + y` → `qint[N] z; QAdd(x, y, z)` where `N` is inferred from operand widths (`qint[]` without an initializer is rejected)
+- `qint[n] z = x + y` → `qint[n] z; QAdd(x, y, z)` (uses ripple-carry adder)
 - `qint d = x - y` → `qint d; QSub(x, y, d)` (uses ripple-borrow subtractor)
 - `qint w = x * y` → `qint w; QMult(x, y, w)` (uses shift-and-add multiplier)
 - `qint q = x / y` → `qint q, _remainder; QDiv(x, y, q, _remainder)` (division with remainder)
 - `qint m = x % y` → `qint m; QMod(x, y, m)` (modulus operation)
 - Operator precedence: `*`, `/`, `%` bind tighter than `+`, `-`
 - Automatic destination initialization
+- Classical integer constants (`x + 5`, `a * 3`) are materialized as `qint` registers
+- Algebraic simplification: `a + 0`, `a * 1`, `a * 0` avoid unnecessary arithmetic circuits
+- Compile-time width checks: mismatched `qint[n]` operands are rejected
 
 **Division Operator Notes:**
 - The `/` operator computes the quotient and creates a temporary remainder variable
@@ -810,12 +881,12 @@ QDiv(dividend, divisor, quotient, remainder)  // Get both quotient and remainder
 ```quanta
 qint[3] a
 qint[3] b
-qint[1] flag              // or qubit flag
+qint[1] flag              // or qbit flag
 Compare(a, b, flag)        // flag = (a >= b)
 ```
 
 **Semantics:**
-- `flag` must be `qint[1]` or `qubit`
+- `flag` must be `qint[1]` or `qbit`
 - Result usable only as **quantum control**
 - `|a⟩|b⟩|0⟩ → |a⟩|b⟩|a ≥ b⟩`
 
@@ -895,7 +966,7 @@ Prepares a **Bell pair** (maximally entangled 2-qubit state):
 
 **Usage:**
 ```quanta
-qubit[2] q
+qbit[2] q
 Bell(q[0], q[1])
 ```
 
@@ -921,7 +992,7 @@ You can pass the **whole register**, a **slice**, or **explicit qubits**:
 
 **Usage:**
 ```quanta
-qubit[6] q
+qbit[6] q
 
 GHZ(q)                   // whole register → GHZ on q[0]..q[5]
 GHZ(q[0], q[1], q[2])    // explicit qubits
@@ -949,7 +1020,7 @@ Creates a **3-qubit W state**:
 
 **Usage:**
 ```quanta
-qubit[3] q
+qbit[3] q
 WState(q[0], q[1], q[2])
 ```
 
@@ -968,7 +1039,7 @@ Swaps two qubits using the standard 3-CNOT decomposition.
 
 **Usage:**
 ```quanta
-qubit[4] q
+qbit[4] q
 SwapGate(q[0], q[3])
 ```
 
@@ -987,7 +1058,7 @@ Applies the **Quantum Fourier Transform** on a register of qubits.
 
 **Usage:**
 ```quanta
-qubit[4] q
+qbit[4] q
 QFT(q[0], q[1], q[2], q[3])
 ```
 
@@ -1020,7 +1091,7 @@ Applies the **Inverse Quantum Fourier Transform** (reverse of QFT).
 
 **Usage:**
 ```quanta
-qubit[4] q
+qbit[4] q
 InverseQFT(q[0], q[1], q[2], q[3])
 ```
 
@@ -1118,7 +1189,7 @@ Print(q)      // |ψ⟩ (symbolic)
 |---|---|
 |Primitive|Normal|
 |`bit[n]`|Measurement results|
-|`qubit[n]`|Symbolic bra-ket|
+|`qbit[n]`|Symbolic bra-ket|
 
 📌 No amplitudes unless simulator supports it.
 
@@ -1135,7 +1206,7 @@ Parses Quanta source, runs it in a statevector simulator, and returns the string
 ```python
 from quanta import get_prints
 terminal = get_prints("""
-qubit q
+qbit q
 H(q)
 print(q)
 """)
@@ -1160,7 +1231,7 @@ Warn("Simulator-only feature")
 
 - **`Len(q)`** - Returns the size of a quantum register, classical register, or array. Evaluated at compile-time. Useful for bounds checking and loop generation.
   ```quanta
-  qubit[5] q
+  qbit[5] q
   var size = Len(q)  // size = 5
   ```
 
@@ -1212,7 +1283,7 @@ Warn("Simulator-only feature")
 #### Example 1: Bell State
 
 ```quanta
-qubit[2] q
+qbit[2] q
 bit[2] c
 
 gate Bellgate(a, b) {
@@ -1234,11 +1305,20 @@ qint[3] a = 1
 qint[3] b = 3
 qint[3] c = a + b        // Operator overloading
 
-// Multiple operands
+// Inferred bit width (type required, size optional)
 qint[4] x = 2
 qint[4] y = 3
+qint[] sum = x + y       // sum inferred as qint[4]
+
+// Classical constant operand
+qint[4] offset = x + 5
+
+// Multiple operands
 qint[4] d = 4
 qint[4] total = x + y + d  // QAdd(x, y, d, total)
+
+// Precedence: multiply before add
+qint[4] r = x + y * d      // QMult(y, d, _temp); QAdd(x, _temp, r)
 
 // Multiplication
 qint[3] m1 = 2
@@ -1373,16 +1453,34 @@ var x = 1; var y = 2
 # Install in development mode (from project root)
 pip install -e .[dev]
 
-# Run the test suite
-python ignore/test.py
+# Run the test suite (Windows) — 127 pytest tests
+test.bat
 
-# Or use pytest if configured
-pytest
+# Or run pytest directly (set PYTHONPATH=src if not installed)
+python -m pytest tests/ -v --tb=short
+
+# Optional: legacy integration script in ignore/
+python ignore/test.py
 
 # Format and lint
 black src
 ruff check src
 ```
+
+The `tests/` directory (127 tests) includes:
+
+| Module | Coverage |
+|--------|----------|
+| `test_parser.py` | Parsing |
+| `test_examples.py` | End-to-end compile |
+| `test_lowering.py` | QASM lowering, `Measure`, `qdec`/`qfloat`, high-level gates |
+| `test_lowering_structured.py` | `keep_structure=True` |
+| `test_indexing.py` | Fancy indexing |
+| `test_tensors.py` | Tensor types and declarations |
+| `test_tensor_algebra.py` | Dot/cross/elementwise/Kronecker products |
+| `test_qint_operators.py` | `qint` `+`/`*`, `qint[]` size inference, constants, simplification, width checks |
+| `test_fidelity.py` | `Fidelity()` metric |
+| `test_print_formatting.py` | f-string print specifiers |
 
 ## License
 

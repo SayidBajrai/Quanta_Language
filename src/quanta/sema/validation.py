@@ -6,11 +6,21 @@ from typing import Dict, Optional, List, Any
 from ..ast.nodes import (
     Program, Stmt, Expr,
     VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
-    ForStmt, IfStmt, ReturnStmt, ExprStmt,
-    CallExpr, IndexExpr, SliceExpr, BinaryExpr, UnaryExpr,
-    VarExpr, LiteralExpr, ListExpr, GroupExpr, AssignExpr,
+    ForStmt, WhileStmt, IfStmt, ReturnStmt, ExprStmt,
+    CallExpr, IndexExpr, SingleIndex, SliceIndex, SliceFull, BinaryExpr, UnaryExpr,
+    VarExpr, LiteralExpr, FStringExpr, ListExpr, GroupExpr, AssignExpr,
 )
 from ..errors import QuantaSemanticError, QuantaTypeError
+from ..types.tensor import TensorType, infer_shape, validate_shape
+from .indexing import (
+    expand_index_items,
+    needs_index_expansion,
+    get_register_size,
+    get_register_shape,
+    eval_const_int,
+    effective_arg_count,
+)
+from .typecheck import tensor_type_from_decl, tensor_type_from_quantum, eval_literal_list
 
 
 class Symbol:
@@ -30,22 +40,39 @@ class SemanticAnalyzer:
         self.functions: Dict[str, FuncDecl] = {}
         self.gates: Dict[str, GateDecl] = {}
         self.constants: Dict[str, ConstDecl] = {}
+        self.tensor_shapes: Dict[str, tuple] = {}
         # Built-in constants
         import math
         self.builtin_constants = {
             "pi": math.pi,
             "e": math.e,
         }
+        self.builtin_functions = {
+            "reset",
+            "int",
+            "arccos",
+            "acos",
+            "sin",
+            "cos",
+            "len",
+            "range",
+            "assert",
+            "error",
+            "warn",
+            "Print",
+            "print",
+        }
     
-    def analyze(self, ast: Program):
+    def analyze(self, ast: Program, keep_structure: bool = False):
         """Perform semantic analysis on program"""
+        self.keep_structure = keep_structure
         # First pass: collect declarations
         for stmt in ast.statements:
             if isinstance(stmt, QuantumDecl):
-                if stmt.size2 is not None:
-                    self.symbols[stmt.name] = Symbol(stmt.name, f"{stmt.kind}[{stmt.size or 0},{stmt.size2}]")
-                else:
-                    self.symbols[stmt.name] = Symbol(stmt.name, f"{stmt.kind}[{stmt.size or 1}]")
+                tensor_type = tensor_type_from_quantum(stmt)
+                self.symbols[stmt.name] = Symbol(stmt.name, tensor_type.format())
+                if tensor_type.shape():
+                    self.tensor_shapes[stmt.name] = tensor_type.shape()
             elif isinstance(stmt, FuncDecl):
                 self.functions[stmt.name] = stmt
             elif isinstance(stmt, GateDecl):
@@ -55,6 +82,11 @@ class SemanticAnalyzer:
                 self.symbols[stmt.name] = Symbol(stmt.name, "const", stmt.value)
             elif isinstance(stmt, LetDecl):
                 self.symbols[stmt.name] = Symbol(stmt.name, "let", stmt.value)
+            elif isinstance(stmt, VarDecl):
+                tensor_type = tensor_type_from_decl(stmt)
+                self.symbols[stmt.name] = Symbol(stmt.name, tensor_type.format(), stmt.value)
+                if tensor_type.shape():
+                    self.tensor_shapes[stmt.name] = tensor_type.shape()
         
         # Second pass: validate statements
         for stmt in ast.statements:
@@ -65,18 +97,25 @@ class SemanticAnalyzer:
         if isinstance(stmt, VarDecl):
             if stmt.value:
                 self._validate_expression(stmt.value)
+                self._validate_tensor_initializer(stmt)
         elif isinstance(stmt, ConstDecl):
             self._validate_expression(stmt.value)
         elif isinstance(stmt, LetDecl):
             self._validate_expression(stmt.value)
         elif isinstance(stmt, QuantumDecl):
-            pass  # Already registered
+            if stmt.kind == "qint" and stmt.shape and any(d is None for d in stmt.shape):
+                if stmt.value is None:
+                    raise QuantaSemanticError(
+                        "qint[] requires an initializer for size inference or an explicit bit width"
+                    )
         elif isinstance(stmt, FuncDecl):
             self._validate_function(stmt)
         elif isinstance(stmt, GateDecl):
             self._validate_gate(stmt)
         elif isinstance(stmt, ForStmt):
             self._validate_for(stmt)
+        elif isinstance(stmt, WhileStmt):
+            self._validate_while(stmt)
         elif isinstance(stmt, IfStmt):
             self._validate_if(stmt)
         elif isinstance(stmt, ExprStmt):
@@ -87,19 +126,40 @@ class SemanticAnalyzer:
     
     def _validate_function(self, func: FuncDecl):
         """Validate function declaration"""
-        # Check for recursion (v1 restriction)
-        # Functions with quantum ops must be inlinable
+        saved_symbols = {}
+        for pspec in func.param_specs:
+            saved_symbols[pspec.name] = self.symbols.get(pspec.name)
+            self.symbols[pspec.name] = Symbol(pspec.name, pspec.kind)
+
+        has_return = any(isinstance(s, ReturnStmt) for s in func.body)
+        if self.keep_structure and func.return_type and func.return_type != "var" and not has_return:
+            raise QuantaSemanticError(
+                f"Function '{func.name}' with return type '{func.return_type}' must contain a return statement"
+            )
+
         for stmt in func.body:
+            if isinstance(stmt, QuantumDecl):
+                self.symbols[stmt.name] = Symbol(stmt.name, stmt.kind)
             self._validate_statement(stmt)
+
+        for stmt in func.body:
+            if isinstance(stmt, QuantumDecl) and stmt.name not in saved_symbols:
+                del self.symbols[stmt.name]
+
+        for pspec in func.param_specs:
+            if saved_symbols[pspec.name] is None:
+                del self.symbols[pspec.name]
+            else:
+                self.symbols[pspec.name] = saved_symbols[pspec.name]
     
     def _validate_gate(self, gate: GateDecl):
         """Validate gate declaration"""
-        # Add gate parameters to symbol table (as qubit parameters)
+        # Add gate parameters to symbol table (as qbit parameters)
         saved_symbols = {}
         for param in gate.params:
-            # Gate parameters are qubit/bit references
+            # Gate parameters are qbit/bit references
             saved_symbols[param] = self.symbols.get(param)
-            self.symbols[param] = Symbol(param, "qubit")
+            self.symbols[param] = Symbol(param, "qbit")
         
         # Validate gate body with parameters in scope
         for stmt in gate.body:
@@ -138,6 +198,16 @@ class SemanticAnalyzer:
             self._validate_statement(then_stmt)
         for else_stmt in stmt.else_body:
             self._validate_statement(else_stmt)
+
+    def _validate_while(self, stmt: WhileStmt):
+        """Validate while loop"""
+        if not self.keep_structure:
+            raise QuantaSemanticError(
+                "while loops require compile(..., keep_structure=True)"
+            )
+        self._validate_expression(stmt.condition)
+        for body_stmt in stmt.body:
+            self._validate_statement(body_stmt)
     
     def _validate_expression(self, expr: Expr):
         """Validate an expression"""
@@ -145,8 +215,6 @@ class SemanticAnalyzer:
             self._validate_call(expr)
         elif isinstance(expr, IndexExpr):
             self._validate_index(expr)
-        elif isinstance(expr, SliceExpr):
-            self._validate_slice(expr)
         elif isinstance(expr, BinaryExpr):
             self._validate_expression(expr.left)
             self._validate_expression(expr.right)
@@ -156,8 +224,13 @@ class SemanticAnalyzer:
             if (expr.name not in self.symbols and 
                 expr.name not in self.functions and 
                 expr.name not in self.gates and
-                expr.name not in self.builtin_constants):
+                expr.name not in self.builtin_constants and
+                expr.name not in self.builtin_functions):
                 raise QuantaSemanticError(f"Undefined variable or function: {expr.name}")
+        elif isinstance(expr, FStringExpr):
+            for part in expr.parts:
+                if part.expr is not None:
+                    self._validate_expression(part.expr)
         elif isinstance(expr, ListExpr):
             for elem in expr.elements:
                 self._validate_expression(elem)
@@ -165,6 +238,15 @@ class SemanticAnalyzer:
             self._validate_expression(expr.expr)
         elif isinstance(expr, AssignExpr):
             self._validate_expression(expr.value)
+            if (
+                isinstance(expr.value, CallExpr)
+                and isinstance(expr.value.callee, VarExpr)
+                and expr.value.callee.name in self.functions
+                and not self.keep_structure
+            ):
+                raise QuantaSemanticError(
+                    "Assignment from function calls requires compile(..., keep_structure=True)"
+                )
     
     def _validate_call(self, expr: CallExpr):
         """Validate function/gate call"""
@@ -232,25 +314,59 @@ class SemanticAnalyzer:
                 return
             
             if name in self.gates:
-                # Gate call - validate arguments match
+                # Gate call - validate arguments match (including fancy index expansion)
                 gate = self.gates[name]
-                if len(expr.args) != len(gate.params):
+                registers = self._register_sizes()
+                arg_count = sum(effective_arg_count(a, registers) for a in expr.args)
+                if arg_count != len(gate.params):
                     raise QuantaSemanticError(
                         f"Gate '{name}' expects {len(gate.params)} arguments, "
-                        f"got {len(expr.args)}"
+                        f"got {arg_count}"
                     )
                 for arg in expr.args:
                     self._validate_expression(arg)
             elif name in self.functions:
                 # Function call - validate arguments match
                 func = self.functions[name]
-                if len(expr.args) != len(func.params):
+                registers = self._register_sizes()
+                arg_count = sum(effective_arg_count(a, registers) for a in expr.args)
+                if arg_count != len(func.params):
                     raise QuantaSemanticError(
                         f"Function '{name}' expects {len(func.params)} arguments, "
-                        f"got {len(expr.args)}"
+                        f"got {arg_count}"
                     )
                 for arg in expr.args:
                     self._validate_expression(arg)
+            elif name == "reset" and len(expr.args) == 1:
+                self._validate_expression(expr.args[0])
+            elif name == "int" and len(expr.args) == 1:
+                self._validate_expression(expr.args[0])
+            elif name in ("arccos", "acos", "sin", "cos"):
+                for arg in expr.args:
+                    self._validate_expression(arg)
+            elif name == "Measure" and len(expr.args) == 2:
+                registers = self._register_sizes()
+                q_count = effective_arg_count(expr.args[0], registers)
+                c_count = effective_arg_count(expr.args[1], registers)
+                if q_count != c_count:
+                    raise QuantaSemanticError(
+                        f"Measure index lists must have the same length "
+                        f"(got {q_count} qbit indices and {c_count} classical indices)"
+                    )
+                for arg in expr.args:
+                    self._validate_expression(arg)
+            elif name == "Fidelity":
+                self._validate_fidelity(expr)
+            elif name == "Reshape":
+                self._validate_reshape(expr)
+            elif name in (
+                "DotProduct",
+                "CrossProduct",
+                "ElementwiseProduct",
+                "TensorProduct",
+                "Shape",
+            ):
+                self._validate_tensor_algebra(name, expr)
             else:
                 # Assume it's a built-in gate or stdlib function - validate arguments
                 for arg in expr.args:
@@ -261,46 +377,225 @@ class SemanticAnalyzer:
             for arg in expr.args:
                 self._validate_expression(arg)
     
+    def _is_qbit_register_expr(self, expr: Expr) -> bool:
+        if isinstance(expr, VarExpr):
+            sym = self.symbols.get(expr.name)
+            if sym and sym.type.startswith(("qbit", "qint", "qdec", "qfloat")):
+                return True
+        if isinstance(expr, IndexExpr) and isinstance(expr.base, VarExpr):
+            sym = self.symbols.get(expr.base.name)
+            if sym and sym.type.startswith(("qbit", "qint", "qdec", "qfloat")):
+                return True
+        return False
+
+    def _qbit_register_size(self, expr: Expr, registers: Dict[str, tuple]) -> Optional[int]:
+        if isinstance(expr, VarExpr) and expr.name in registers:
+            return registers[expr.name][1]
+        if isinstance(expr, IndexExpr) and isinstance(expr.base, VarExpr):
+            if expr.base.name in registers:
+                return 1
+        return None
+
+    def _validate_fidelity(self, expr: CallExpr):
+        if len(expr.args) != 2:
+            raise QuantaSemanticError("Fidelity requires exactly 2 arguments")
+        registers = self._register_sizes()
+        sizes = []
+        for arg in expr.args:
+            self._validate_expression(arg)
+            if not self._is_qbit_register_expr(arg):
+                raise QuantaSemanticError(
+                    "Fidelity arguments must be qbit or qint registers"
+                )
+            sizes.append(self._qbit_register_size(arg, registers))
+        if sizes[0] is not None and sizes[1] is not None and sizes[0] != sizes[1]:
+            raise QuantaSemanticError(
+                f"Fidelity requires registers of the same size "
+                f"(got {sizes[0]} and {sizes[1]} qubits)"
+            )
+
+    def _validate_tensor_initializer(self, decl: VarDecl):
+        tensor_type = tensor_type_from_decl(decl)
+        if tensor_type.is_scalar or decl.value is None:
+            return
+        if not isinstance(decl.value, ListExpr):
+            return
+        try:
+            literal = eval_literal_list(decl.value)
+            if tensor_type.is_dynamic:
+                shape = tuple(validate_shape(literal, tensor_type.dimensions, decl.name))
+                self.tensor_shapes[decl.name] = shape
+            else:
+                validate_shape(literal, tensor_type.dimensions, decl.name)
+        except QuantaSemanticError:
+            raise
+        except Exception:
+            return
+
+    def _validate_reshape(self, expr: CallExpr):
+        if len(expr.args) < 2:
+            raise QuantaSemanticError("Reshape requires a tensor and at least one dimension")
+        for arg in expr.args:
+            self._validate_expression(arg)
+
+    def _validate_tensor_algebra(self, name: str, expr: CallExpr):
+        arity = {
+            "DotProduct": 2,
+            "CrossProduct": 2,
+            "ElementwiseProduct": 2,
+            "TensorProduct": 2,
+            "Shape": 1,
+        }
+        expected = arity[name]
+        if len(expr.args) != expected:
+            raise QuantaSemanticError(f"{name} requires exactly {expected} argument(s)")
+        for arg in expr.args:
+            self._validate_expression(arg)
+
     def _validate_index(self, expr: IndexExpr):
         """Validate index expression"""
         self._validate_expression(expr.base)
-        self._validate_expression(expr.index)
-        # Index must be compile-time evaluable for quantum registers
-        if isinstance(expr.index, LiteralExpr):
-            try:
-                int(expr.index.value)
-            except (ValueError, TypeError):
-                raise QuantaTypeError("Quantum register index must be a compile-time integer")
+        if isinstance(expr.base, IndexExpr):
+            for item in expr.items:
+                if isinstance(item, SingleIndex):
+                    self._validate_expression(item.expr)
+            return
+        for item in expr.items:
+            if isinstance(item, SingleIndex):
+                self._validate_expression(item.expr)
+            elif isinstance(item, SliceIndex):
+                if item.start:
+                    self._validate_expression(item.start)
+                if item.stop:
+                    self._validate_expression(item.stop)
+                if item.step:
+                    self._validate_expression(item.step)
+            elif isinstance(item, SliceFull):
+                pass
 
-    def _validate_slice(self, expr: SliceExpr):
-        """Validate slice expression (e.g. q[1:4])"""
-        self._validate_expression(expr.base)
-        self._validate_expression(expr.start)
-        self._validate_expression(expr.end)
-        if expr.step is not None:
-            self._validate_expression(expr.step)
-        # Start/end/step should be compile-time evaluable (literal or simple expr)
-        # We don't require LiteralExpr here; codegen will evaluate or fail
+        registers = self._register_sizes()
+        reg_name, reg_size = get_register_size(expr, registers)
+        shape = get_register_shape(expr, registers)
+
+        if reg_name is None:
+            base = expr.base
+            while isinstance(base, IndexExpr):
+                base = base.base
+            if isinstance(base, VarExpr) and base.name in self.tensor_shapes:
+                shape = list(self.tensor_shapes[base.name])
+                depth = 0
+                walker = expr
+                while isinstance(walker.base, IndexExpr):
+                    depth += 1
+                    walker = walker.base
+                remaining = shape[depth:]
+                if isinstance(expr.base, IndexExpr):
+                    if not expr.is_simple():
+                        raise QuantaSemanticError(
+                            f"Chained tensor indexing supports only scalar indices"
+                        )
+                else:
+                    if len(expr.items) > len(remaining):
+                        raise QuantaSemanticError(
+                            f"Tensor index dimension mismatch for '{base.name}': "
+                            f"expected at most {len(remaining)} indices, got {len(expr.items)}"
+                        )
+                    if len(expr.items) < len(remaining) and not all(
+                        isinstance(i, SingleIndex) for i in expr.items
+                    ):
+                        raise QuantaSemanticError(
+                            f"Partial tensor indexing for '{base.name}' must use scalar indices"
+                        )
+
+        if needs_index_expansion(expr, registers):
+            expand_index_items(expr.items, reg_size, reg_name or "", shape=shape)
+        elif expr.is_simple() and isinstance(expr.items[0], SingleIndex):
+            idx_expr = expr.items[0].expr
+            if reg_name and reg_size is not None:
+                try:
+                    idx = eval_const_int(idx_expr)
+                    if idx < 0 or idx >= reg_size:
+                        raise QuantaSemanticError(
+                            f"Index {idx} out of range for {reg_name}"
+                        )
+                except QuantaTypeError:
+                    pass  # dynamic index (e.g. for-loop variable) allowed for simple access
+            elif isinstance(idx_expr, LiteralExpr):
+                try:
+                    int(idx_expr.value)
+                except (ValueError, TypeError):
+                    raise QuantaTypeError("Quantum register index must be a compile-time integer")
+
+    def _register_sizes(self) -> Dict[str, tuple]:
+        """Build register name -> (kind, flat_size, shape) from symbol table."""
+        sizes: Dict[str, tuple] = {}
+        for name, sym in self.symbols.items():
+            if sym.type and ("qbit" in sym.type or "bit" in sym.type or "qint" in sym.type or "bint" in sym.type):
+                tensor_type = TensorType.parse_legacy(sym.type)
+                shape = [d if d is not None else 1 for d in tensor_type.dimensions] or [1]
+                flat = tensor_type.total_size() or 1
+                sizes[name] = (tensor_type.base, flat, shape)
+        return sizes
+    
+    def _expr_qint_width(self, expr: Expr) -> Optional[int]:
+        """Return bit width for a qint register expression, if known."""
+        if isinstance(expr, VarExpr):
+            sym = self.symbols.get(expr.name)
+            if sym:
+                tensor_type = TensorType.parse_legacy(sym.type)
+                if tensor_type.base == "qint":
+                    return tensor_type.total_size()
+        elif isinstance(expr, IndexExpr) and isinstance(expr.base, VarExpr):
+            return self._expr_qint_width(expr.base)
+        return None
+
+    def _collect_qint_widths(self, expr: CallExpr) -> List[int]:
+        widths: List[int] = []
+        for arg in expr.args:
+            self._validate_expression(arg)
+            width = self._expr_qint_width(arg)
+            if width is not None:
+                widths.append(width)
+        return widths
+
+    def _validate_qint_matching_widths(self, expr: CallExpr, op_name: str) -> None:
+        widths = self._collect_qint_widths(expr)
+        if len(widths) < 2:
+            return
+        dest_width = widths[-1]
+        input_widths = widths[:-1]
+        if input_widths and len(set(input_widths)) > 1:
+            raise QuantaSemanticError(
+                f"{op_name}: all input qint registers must have the same bit width"
+            )
+        if input_widths and dest_width != input_widths[0]:
+            raise QuantaSemanticError(
+                f"{op_name}: destination width ({dest_width}) must match input width ({input_widths[0]})"
+            )
 
     def _validate_qadd(self, expr: CallExpr):
         """Validate QAdd operation"""
         if len(expr.args) < 2:
             raise QuantaSemanticError("QAdd requires at least 2 arguments (inputs and destination)")
-        
-        # All arguments should be qint types
-        for arg in expr.args:
-            self._validate_expression(arg)
-            # TODO: Check that all args are qint types with matching widths
-    
+        self._validate_qint_matching_widths(expr, "QAdd")
+
     def _validate_qmult(self, expr: CallExpr):
         """Validate QMult operation"""
         if len(expr.args) < 3:
             raise QuantaSemanticError("QMult requires at least 3 arguments (inputs and destination)")
-        
-        # All arguments should be qint types
-        for arg in expr.args:
-            self._validate_expression(arg)
-            # TODO: Check that output width >= sum of input widths
+        widths = self._collect_qint_widths(expr)
+        if len(widths) < 2:
+            return
+        dest_width = widths[-1]
+        input_widths = widths[:-1]
+        if input_widths and len(set(input_widths)) > 1:
+            raise QuantaSemanticError(
+                "QMult: all input qint registers must have the same bit width"
+            )
+        if input_widths and dest_width < input_widths[0]:
+            raise QuantaSemanticError(
+                f"QMult: destination width ({dest_width}) must be at least input width ({input_widths[0]})"
+            )
     
     def _validate_compare(self, expr: CallExpr):
         """Validate Compare operation"""
@@ -309,7 +604,7 @@ class SemanticAnalyzer:
         
         for arg in expr.args:
             self._validate_expression(arg)
-        # TODO: Check that flag is qint[1] or qubit
+        # TODO: Check that flag is qint[1] or qbit
     
     def _validate_qftadd(self, expr: CallExpr):
         """Validate QFTAdd operation"""
@@ -390,51 +685,45 @@ class SemanticAnalyzer:
         for arg in expr.args:
             self._validate_expression(arg)
         # TODO: Check that target is classical (int or bint)
-    
+
     def _validate_bell(self, expr: CallExpr):
-        """Validate Bell gate operation (2 qubits: explicit, or whole register/slice)"""
+        """Validate Bell gate operation (2 qbits: explicit, or whole register/slice)"""
         if len(expr.args) < 1 or len(expr.args) > 2:
             raise QuantaSemanticError("Bell requires 1 or 2 arguments: Bell(q0, q1) or Bell(q[0:2])")
-        
         for arg in expr.args:
             self._validate_expression(arg)
-    
+
     def _validate_ghz(self, expr: CallExpr):
-        """Validate GHZ gate operation (whole register, slice, or explicit qubits)"""
+        """Validate GHZ gate operation (whole register, slice, or explicit qbits)"""
         if len(expr.args) < 1:
             raise QuantaSemanticError("GHZ requires at least 1 argument: GHZ(q) or GHZ(q[0], q[1], ...)")
-        
         for arg in expr.args:
             self._validate_expression(arg)
-    
+
     def _validate_wstate(self, expr: CallExpr):
-        """Validate WState gate operation (3 qubits: explicit or slice)"""
+        """Validate WState gate operation (3 qbits: explicit or slice)"""
         if len(expr.args) < 1 or len(expr.args) > 3:
             raise QuantaSemanticError("WState requires 1 or 3 arguments: WState(q[0:3]) or WState(q0, q1, q2)")
-        
         for arg in expr.args:
             self._validate_expression(arg)
-    
+
     def _validate_swapgate(self, expr: CallExpr):
         """Validate SwapGate operation"""
         if len(expr.args) != 2:
             raise QuantaSemanticError("SwapGate requires exactly 2 arguments: SwapGate(a, b)")
-        
         for arg in expr.args:
             self._validate_expression(arg)
-    
+
     def _validate_qft(self, expr: CallExpr):
-        """Validate QFT gate operation (whole register, slice, or explicit qubits)"""
+        """Validate QFT gate operation (whole register, slice, or explicit qbits)"""
         if len(expr.args) < 1:
             raise QuantaSemanticError("QFT requires at least 1 argument: QFT(q) or QFT(q[0], q[1], ...)")
-        
         for arg in expr.args:
             self._validate_expression(arg)
-    
+
     def _validate_inverse_qft(self, expr: CallExpr):
-        """Validate InverseQFT gate operation (whole register, slice, or explicit qubits)"""
+        """Validate InverseQFT gate operation (whole register, slice, or explicit qbits)"""
         if len(expr.args) < 1:
             raise QuantaSemanticError("InverseQFT requires at least 1 argument: InverseQFT(q) or InverseQFT(q[0], ...)")
-        
         for arg in expr.args:
             self._validate_expression(arg)

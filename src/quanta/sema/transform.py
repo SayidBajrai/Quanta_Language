@@ -2,405 +2,476 @@
 AST transformations for operator overloading and desugaring
 """
 
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Set, Tuple, Union
+
 from ..ast.nodes import (
-    Program, Stmt, Expr,
-    VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
-    ForStmt, IfStmt, ReturnStmt, ExprStmt,
-    CallExpr, IndexExpr, SliceExpr, BinaryExpr, UnaryExpr,
-    VarExpr, LiteralExpr, ListExpr, GroupExpr, AssignExpr,
+    Program,
+    Stmt,
+    Expr,
+    VarDecl,
+    QuantumDecl,
+    FuncDecl,
+    GateDecl,
+    ClassDecl,
+    ForStmt,
+    IfStmt,
+    ReturnStmt,
+    ExprStmt,
+    CallExpr,
+    IndexExpr,
+    BinaryExpr,
+    UnaryExpr,
+    VarExpr,
+    LiteralExpr,
+    FStringExpr,
+    ListExpr,
+    GroupExpr,
+    AssignExpr,
 )
 from ..ast.visitor import Visitor
+from .qint_utils import (
+    bitwidth_for_constant,
+    infer_qint_width,
+    is_integer_literal,
+    is_qint_operand,
+    is_qint_one,
+    is_qint_zero,
+    literal_int_value,
+    expr_var_name,
+    parse_qint_width,
+)
+
+
+_QINT_OP_TO_FUNC = {
+    "+": "QAdd",
+    "*": "QMult",
+    "-": "QSub",
+    "/": "QDiv",
+    "%": "QMod",
+}
 
 
 class ASTTransformer(Visitor):
     """Transforms AST to desugar operator overloading and other syntactic sugar"""
-    
+
     def __init__(self):
-        self.symbols = {}  # Track symbol types
+        self.symbols: Dict[str, str] = {}
         self.temp_counter = 0
-        self.new_statements = []
-    
+        self.const_counter = 0
+        self._free_temps: List[str] = []
+        self._declared_temps: Set[str] = set()
+        self._const_cache: Dict[Tuple[int, int], str] = {}
+
     def transform(self, ast: Program) -> Program:
         """Transform AST by desugaring operator overloading"""
-        # First pass: collect symbol types
         for stmt in ast.statements:
             if isinstance(stmt, QuantumDecl):
-                self.symbols[stmt.name] = f"{stmt.kind}[{stmt.size or 1}]"
-            elif isinstance(stmt, VarDecl):
-                if stmt.type_hint:
-                    self.symbols[stmt.name] = stmt.type_hint
-        
-        # Second pass: transform statements
-        transformed_statements = []
+                if stmt.kind == "qint":
+                    if stmt.shape and any(d is None for d in stmt.shape):
+                        self.symbols[stmt.name] = "qint[]"
+                    else:
+                        self.symbols[stmt.name] = f"qint[{stmt.size or 1}]"
+                else:
+                    self.symbols[stmt.name] = f"{stmt.kind}[{stmt.size or 1}]"
+            elif isinstance(stmt, VarDecl) and stmt.type_hint:
+                self.symbols[stmt.name] = stmt.type_hint
+
+        transformed_statements: List[Stmt] = []
         for stmt in ast.statements:
             transformed = self._transform_statement(stmt)
             if isinstance(transformed, list):
                 transformed_statements.extend(transformed)
             elif transformed:
                 transformed_statements.append(transformed)
-        
+
         return Program(transformed_statements)
-    
+
     def _transform_statement(self, stmt: Stmt) -> Union[Stmt, List[Stmt]]:
-        """Transform a statement"""
         if isinstance(stmt, VarDecl):
-            # Transform assignment if it's a qint operation
             if stmt.value and isinstance(stmt.value, BinaryExpr):
-                if stmt.value.op in ["+", "*", "-", "/", "%"]:
-                    return self._transform_qint_assignment(stmt)
+                if stmt.value.op in _QINT_OP_TO_FUNC:
+                    stmt_type = stmt.type_hint or ""
+                    if stmt_type.startswith("qint"):
+                        return self._transform_qint_assignment(stmt)
             return stmt
-        elif isinstance(stmt, QuantumDecl):
-            # Handle qint initialization with operator overloading
+
+        if isinstance(stmt, QuantumDecl):
             if stmt.value and isinstance(stmt.value, BinaryExpr):
-                if stmt.value.op in ["+", "*", "-", "/", "%"]:
+                if stmt.value.op in _QINT_OP_TO_FUNC and stmt.kind == "qint":
                     return self._transform_qint_quantum_decl(stmt)
-            # Handle other initialization values
             if stmt.value:
                 transformed = self._transform_expression(stmt.value)
                 if transformed != stmt.value:
                     stmt.value = transformed
             return stmt
-        elif isinstance(stmt, ExprStmt):
+
+        if isinstance(stmt, ExprStmt):
             transformed = self._transform_expression(stmt.expr)
             if transformed != stmt.expr:
                 stmt.expr = transformed
             return stmt
-        elif isinstance(stmt, ForStmt):
+
+        if isinstance(stmt, ForStmt):
             for body_stmt in stmt.body:
                 transformed = self._transform_statement(body_stmt)
                 if isinstance(transformed, list):
-                    # Replace with multiple statements
                     idx = stmt.body.index(body_stmt)
-                    stmt.body[idx:idx+1] = transformed
+                    stmt.body[idx : idx + 1] = transformed
             return stmt
-        elif isinstance(stmt, IfStmt):
+
+        if isinstance(stmt, IfStmt):
             for then_stmt in stmt.then_body:
                 transformed = self._transform_statement(then_stmt)
                 if isinstance(transformed, list):
                     idx = stmt.then_body.index(then_stmt)
-                    stmt.then_body[idx:idx+1] = transformed
+                    stmt.then_body[idx : idx + 1] = transformed
             for else_stmt in stmt.else_body:
                 transformed = self._transform_statement(else_stmt)
                 if isinstance(transformed, list):
                     idx = stmt.else_body.index(else_stmt)
-                    stmt.else_body[idx:idx+1] = transformed
+                    stmt.else_body[idx : idx + 1] = transformed
             return stmt
+
         return stmt
-    
+
     def _transform_expression(self, expr: Expr) -> Expr:
-        """Transform an expression"""
         if isinstance(expr, BinaryExpr):
             return self._transform_binary_expr(expr)
-        elif isinstance(expr, CallExpr):
-            # Transform arguments recursively
+        if isinstance(expr, CallExpr):
             new_args = [self._transform_expression(arg) for arg in expr.args]
             if new_args != expr.args:
                 expr.args = new_args
             return expr
-        elif isinstance(expr, IndexExpr):
+        if isinstance(expr, IndexExpr):
             expr.base = self._transform_expression(expr.base)
-            expr.index = self._transform_expression(expr.index)
+            for item in expr.items:
+                if hasattr(item, "expr") and item.expr is not None:
+                    item.expr = self._transform_expression(item.expr)
+                if hasattr(item, "start") and item.start is not None:
+                    item.start = self._transform_expression(item.start)
+                if hasattr(item, "stop") and item.stop is not None:
+                    item.stop = self._transform_expression(item.stop)
+                if hasattr(item, "step") and item.step is not None:
+                    item.step = self._transform_expression(item.step)
             return expr
-        elif isinstance(expr, SliceExpr):
-            expr.base = self._transform_expression(expr.base)
-            expr.start = self._transform_expression(expr.start)
-            expr.end = self._transform_expression(expr.end)
-            if expr.step is not None:
-                expr.step = self._transform_expression(expr.step)
-            return expr
-        elif isinstance(expr, UnaryExpr):
+        if isinstance(expr, UnaryExpr):
             expr.right = self._transform_expression(expr.right)
             return expr
-        elif isinstance(expr, GroupExpr):
+        if isinstance(expr, GroupExpr):
             expr.expr = self._transform_expression(expr.expr)
             return expr
+        if isinstance(expr, FStringExpr):
+            for part in expr.parts:
+                if part.expr is not None:
+                    part.expr = self._transform_expression(part.expr)
+            return expr
         return expr
-    
+
     def _transform_binary_expr(self, expr: BinaryExpr) -> Expr:
-        """Transform binary expression, handling operator overloading"""
-        # Transform left and right recursively first
         left = self._transform_expression(expr.left)
         right = self._transform_expression(expr.right)
-        
-        # Check if this is a qint operation
-        if expr.op in ["+", "*", "-", "/", "%"]:
-            left_type = self._get_expression_type(left)
-            right_type = self._get_expression_type(right)
-            
-            if left_type and left_type.startswith("qint") and right_type and right_type.startswith("qint"):
-                # This is a qint operation - return a marker that will be handled by assignment
-                # For now, return the binary expr but mark it for transformation
-                return expr
-        
-        # For non-qint operations or other operators, return as-is
         expr.left = left
         expr.right = right
+
+        if expr.op in _QINT_OP_TO_FUNC and is_qint_operand(left, self.symbols) and is_qint_operand(
+            right, self.symbols
+        ):
+            return expr
         return expr
-    
-    def _transform_qint_assignment(self, stmt: VarDecl) -> List[Stmt]:
-        """Transform qint assignment like 'qint[3] z = x + y' into QAdd/QMult/QSub/QDiv/QMod calls"""
-        if not isinstance(stmt.value, BinaryExpr):
-            return [stmt]
-        
-        op = stmt.value.op
-        if op not in ["+", "*", "-", "/", "%"]:
-            return [stmt]
-        
-        # Get operands
-        operands = self._collect_operands(stmt.value)
-        
-        # Determine operation name
-        if op == "+":
-            op_name = "QAdd"
-        elif op == "*":
-            op_name = "QMult"
-        elif op == "-":
-            op_name = "QSub"
-        elif op == "/":
-            # Division: QDiv(dividend, divisor, quotient, remainder)
-            # For operator overloading, we only want the quotient
-            # Create a temporary for remainder
-            if len(operands) != 2:
-                return [stmt]  # Only handle binary division for now
-            
-            temp_remainder = f"_remainder_{self.temp_counter}"
-            self.temp_counter += 1
-            
-            # Get type hint for remainder (same as quotient)
-            remainder_type = stmt.type_hint
-            
-            # Create QDiv call with temporary remainder
-            dest = VarExpr(stmt.name)
-            remainder_var = VarExpr(temp_remainder)
-            args = operands + [dest, remainder_var]
-            call = CallExpr(VarExpr("QDiv"), args)
-            
-            # Create declarations
-            decl = VarDecl(stmt.name, stmt.type_hint, None)
-            remainder_decl = VarDecl(temp_remainder, remainder_type, None)
-            
-            # Create expression statement with the call
-            call_stmt = ExprStmt(call)
-            
-            return [decl, remainder_decl, call_stmt]
-        elif op == "%":
-            op_name = "QMod"
-        else:
-            return [stmt]
-        
-        # For +, *, -, %: standard variadic operations
-        # Last argument is the destination (the variable being assigned)
-        dest = VarExpr(stmt.name)
-        args = operands + [dest]
-        call = CallExpr(VarExpr(op_name), args)
-        
-        # Create declaration without initialization
-        decl = VarDecl(stmt.name, stmt.type_hint, None)
-        
-        # Create expression statement with the call
-        call_stmt = ExprStmt(call)
-        
-        return [decl, call_stmt]
-    
-    def _transform_qint_quantum_decl(self, stmt: QuantumDecl) -> List[Stmt]:
-        """Transform qint declaration with binary expression like 'qint[3] c = a + b' into QAdd/QMult/QSub/QDiv/QMod calls"""
-        if not isinstance(stmt.value, BinaryExpr):
-            return [stmt]
-        
-        # Handle precedence: if we have (a + b) * c, we need to evaluate (a + b) first
-        result = self._transform_with_precedence(stmt.value, stmt.name, stmt.kind, stmt.size)
-        if result:
-            return result
-        
-        op = stmt.value.op
-        if op not in ["+", "*", "-", "/", "%"]:
-            return [stmt]
-        
-        # Get operands
-        operands = self._collect_operands(stmt.value)
-        
-        # Determine operation name
-        if op == "+":
-            op_name = "QAdd"
-        elif op == "*":
-            op_name = "QMult"
-        elif op == "-":
-            op_name = "QSub"
-        elif op == "/":
-            # Division: QDiv(dividend, divisor, quotient, remainder)
-            # For operator overloading, we only want the quotient
-            if len(operands) != 2:
-                return [stmt]  # Only handle binary division for now
-            
-            temp_remainder = f"_remainder_{self.temp_counter}"
-            self.temp_counter += 1
-            
-            # Create QDiv call with temporary remainder
-            dest = VarExpr(stmt.name)
-            remainder_var = VarExpr(temp_remainder)
-            args = operands + [dest, remainder_var]
-            call = CallExpr(VarExpr("QDiv"), args)
-            
-            # Create declarations
-            decl = QuantumDecl(stmt.kind, stmt.size, stmt.name, None)
-            remainder_decl = QuantumDecl(stmt.kind, stmt.size, temp_remainder, None)
-            
-            # Create expression statement with the call
-            call_stmt = ExprStmt(call)
-            
-            return [decl, remainder_decl, call_stmt]
-        elif op == "%":
-            op_name = "QMod"
-        else:
-            return [stmt]
-        
-        # For +, *, -, %: standard variadic operations
-        # Last argument is the destination (the variable being declared)
-        dest = VarExpr(stmt.name)
-        args = operands + [dest]
-        call = CallExpr(VarExpr(op_name), args)
-        
-        # Create declaration without initialization
-        decl = QuantumDecl(stmt.kind, stmt.size, stmt.name, None)
-        
-        # Create expression statement with the call
-        call_stmt = ExprStmt(call)
-        
-        return [decl, call_stmt]
-    
-    def _transform_with_precedence(self, expr: BinaryExpr, dest_name: str, kind: str, size: Optional[int]) -> Optional[List[Stmt]]:
-        """Handle precedence: if we have (a + b) * c, evaluate (a + b) first"""
-        # Check if left side is a GroupExpr with a binary expression
-        if isinstance(expr.left, GroupExpr) and isinstance(expr.left.expr, BinaryExpr):
-            inner_expr = expr.left.expr
-            if inner_expr.op in ["+", "*", "-", "/", "%"] and expr.op in ["+", "*", "-", "/", "%"] and inner_expr.op != expr.op:
-                # We have (a + b) * c or (a * b) + c - need to handle precedence
-                # Create temporary variable for inner expression
-                temp_name = f"_temp_{self.temp_counter}"
-                self.temp_counter += 1
-                
-                # Transform inner expression first
-                if inner_expr.op == "+":
-                    inner_op_name = "QAdd"
-                elif inner_expr.op == "*":
-                    inner_op_name = "QMult"
-                elif inner_expr.op == "-":
-                    inner_op_name = "QSub"
-                elif inner_expr.op == "/":
-                    inner_op_name = "QDiv"
-                elif inner_expr.op == "%":
-                    inner_op_name = "QMod"
-                else:
-                    return None
-                
-                inner_operands = self._collect_operands(inner_expr)
-                inner_dest = VarExpr(temp_name)
-                
-                # Handle division specially (needs remainder)
-                if inner_expr.op == "/" and len(inner_operands) == 2:
-                    temp_remainder = f"_remainder_{self.temp_counter}"
-                    self.temp_counter += 1
-                    inner_remainder = VarExpr(temp_remainder)
-                    inner_args = inner_operands + [inner_dest, inner_remainder]
-                    inner_call = CallExpr(VarExpr(inner_op_name), inner_args)
-                    temp_decl = QuantumDecl(kind, size, temp_name, None)
-                    remainder_decl = QuantumDecl(kind, size, temp_remainder, None)
-                    inner_call_stmt = ExprStmt(inner_call)
-                else:
-                    inner_args = inner_operands + [inner_dest]
-                    inner_call = CallExpr(VarExpr(inner_op_name), inner_args)
-                    temp_decl = QuantumDecl(kind, size, temp_name, None)
-                    inner_call_stmt = ExprStmt(inner_call)
-                    remainder_decl = None
-                
-                # Now transform outer expression with temp
-                if expr.op == "+":
-                    outer_op_name = "QAdd"
-                elif expr.op == "*":
-                    outer_op_name = "QMult"
-                elif expr.op == "-":
-                    outer_op_name = "QSub"
-                elif expr.op == "/":
-                    outer_op_name = "QDiv"
-                elif expr.op == "%":
-                    outer_op_name = "QMod"
-                else:
-                    return None
-                
-                # Handle division in outer expression
-                if expr.op == "/":
-                    temp_remainder2 = f"_remainder_{self.temp_counter}"
-                    self.temp_counter += 1
-                    outer_remainder = VarExpr(temp_remainder2)
-                    outer_args = [VarExpr(temp_name), self._transform_expression(expr.right), VarExpr(dest_name), outer_remainder]
-                    outer_call = CallExpr(VarExpr(outer_op_name), outer_args)
-                    outer_call_stmt = ExprStmt(outer_call)
-                    remainder_decl2 = QuantumDecl(kind, size, temp_remainder2, None)
-                else:
-                    outer_args = [VarExpr(temp_name), self._transform_expression(expr.right), VarExpr(dest_name)]
-                    outer_call = CallExpr(VarExpr(outer_op_name), outer_args)
-                    outer_call_stmt = ExprStmt(outer_call)
-                    remainder_decl2 = None
-                
-                # Create final declaration
-                final_decl = QuantumDecl(kind, size, dest_name, None)
-                
-                # Build result list
-                result = [temp_decl]
-                if remainder_decl:
-                    result.append(remainder_decl)
-                result.append(inner_call_stmt)
-                result.append(final_decl)
-                if remainder_decl2:
-                    result.append(remainder_decl2)
-                result.append(outer_call_stmt)
-                
-                return result
-        
-        return None
-    
-    def _collect_operands(self, expr: Expr) -> List[Expr]:
-        """Collect all operands from a chained binary expression"""
-        # Unwrap GroupExpr
+
+    def _acquire_temp(self) -> str:
+        if self._free_temps:
+            return self._free_temps.pop()
+        name = f"_temp_{self.temp_counter}"
+        self.temp_counter += 1
+        return name
+
+    def _release_temp(self, name: str) -> None:
+        if name.startswith("_temp_"):
+            self._free_temps.append(name)
+
+    def _fresh_remainder(self) -> str:
+        name = f"_remainder_{self.temp_counter}"
+        self.temp_counter += 1
+        return name
+
+    def _has_dynamic_qint_shape(self, shape: Optional[List[Optional[int]]]) -> bool:
+        return bool(shape and any(d is None for d in shape))
+
+    def _resolve_size(
+        self,
+        declared_size: Optional[int],
+        type_hint: Optional[str],
+        expr: Expr,
+        dynamic_shape: bool = False,
+    ) -> int:
+        if dynamic_shape:
+            return infer_qint_width(expr, self.symbols)
+        hint_width = parse_qint_width(type_hint)
+        if hint_width is not None:
+            return hint_width
+        if declared_size is not None:
+            return declared_size
+        return infer_qint_width(expr, self.symbols)
+
+    def _qint_symbol_type(self, size: int) -> str:
+        return f"qint[{size}]"
+
+    def _make_qint_decl(self, name: str, size: int, init: Optional[Expr] = None) -> QuantumDecl:
+        return QuantumDecl("qint", size, name, init, shape=[size])
+
+    def _ensure_temp_decl(self, name: str, size: int, stmts: List[Stmt]) -> None:
+        if name in self._declared_temps:
+            return
+        self._declared_temps.add(name)
+        self.symbols[name] = self._qint_symbol_type(size)
+        stmts.append(self._make_qint_decl(name, size))
+
+    def _materialize_constant(self, value: int, width: int) -> Tuple[List[Stmt], Expr]:
+        key = (value, width)
+        if key in self._const_cache:
+            return [], VarExpr(self._const_cache[key])
+
+        name = f"_qconst_{self.const_counter}"
+        self.const_counter += 1
+        self._const_cache[key] = name
+        self.symbols[name] = self._qint_symbol_type(width)
+        decl = self._make_qint_decl(name, width, LiteralExpr(value))
+        return [decl], VarExpr(name)
+
+    def _materialize_operand(
+        self,
+        operand: Expr,
+        size: int,
+        temps_to_release: List[str],
+    ) -> Tuple[List[Stmt], Expr]:
+        if is_integer_literal(operand):
+            value = literal_int_value(operand)
+            assert value is not None
+            masked = value % (1 << size) if size > 0 else value
+            return self._materialize_constant(masked, size)
+
+        if isinstance(operand, BinaryExpr) and operand.op in _QINT_OP_TO_FUNC:
+            temp = self._acquire_temp()
+            stmts: List[Stmt] = []
+            self._ensure_temp_decl(temp, size, stmts)
+            sub_stmts = self._desugar_qint_expr(operand, temp, size, temps_to_release)
+            stmts.extend(sub_stmts)
+            temps_to_release.append(temp)
+            return stmts, VarExpr(temp)
+
+        return [], operand
+
+    def _collect_same_op_operands(self, expr: Expr, op: str) -> List[Expr]:
         if isinstance(expr, GroupExpr):
-            return self._collect_operands(expr.expr)
-        
-        if isinstance(expr, BinaryExpr) and expr.op in ["+", "*", "-", "/", "%"]:
-            left_ops = self._collect_operands(expr.left)
-            right_ops = self._collect_operands(expr.right)
-            return left_ops + right_ops
+            return self._collect_same_op_operands(expr.expr, op)
+        if isinstance(expr, BinaryExpr) and expr.op == op:
+            return (
+                self._collect_same_op_operands(expr.left, op)
+                + self._collect_same_op_operands(expr.right, op)
+            )
+        return [expr]
+
+    def _simplify_operands(self, op: str, operands: List[Expr]) -> Tuple[Optional[List[Expr]], Optional[int]]:
+        """Return simplified operands and optional zero-init value for dest."""
+        if op == "+":
+            filtered = [o for o in operands if not is_qint_zero(o)]
+            if not filtered:
+                return [], 0
+            return filtered, None
+
+        if op == "*":
+            if any(is_qint_zero(o) for o in operands):
+                return [], 0
+            filtered = [o for o in operands if not is_qint_one(o)]
+            if not filtered:
+                return [], 1
+            return filtered, None
+
+        return operands, None
+
+    def _desugar_qint_expr(
+        self,
+        expr: Expr,
+        dest_name: str,
+        size: int,
+        temps_to_release: Optional[List[str]] = None,
+    ) -> List[Stmt]:
+        """Desugar a qint arithmetic expression respecting operator precedence."""
+        if temps_to_release is None:
+            temps_to_release = []
+
+        if isinstance(expr, GroupExpr):
+            return self._desugar_qint_expr(expr.expr, dest_name, size, temps_to_release)
+
+        if not isinstance(expr, BinaryExpr) or expr.op not in _QINT_OP_TO_FUNC:
+            return []
+
+        op = expr.op
+
+        if op == "/":
+            left_stmts, left = self._materialize_operand(expr.left, size, temps_to_release)
+            right_stmts, right = self._materialize_operand(expr.right, size, temps_to_release)
+            remainder_name = self._fresh_remainder()
+            call = CallExpr(
+                VarExpr("QDiv"),
+                [left, right, VarExpr(dest_name), VarExpr(remainder_name)],
+            )
+            remainder_decl = self._make_qint_decl(remainder_name, size)
+            self.symbols[remainder_name] = self._qint_symbol_type(size)
+            dest_decl = self._make_qint_decl(dest_name, size)
+            self.symbols[dest_name] = self._qint_symbol_type(size)
+            return left_stmts + right_stmts + [dest_decl, remainder_decl, ExprStmt(call)]
+
+        op_name = _QINT_OP_TO_FUNC[op]
+        operands_raw = self._collect_same_op_operands(expr, op)
+        simplified_raw, zero_init = self._simplify_operands(op, operands_raw)
+
+        stmts: List[Stmt] = []
+        operands: List[Expr] = []
+        for operand in simplified_raw or []:
+            sub_stmts, ref = self._materialize_operand(operand, size, temps_to_release)
+            stmts.extend(sub_stmts)
+            operands.append(ref)
+
+        dest_decl = self._make_qint_decl(dest_name, size)
+        self.symbols[dest_name] = self._qint_symbol_type(size)
+
+        if zero_init is not None:
+            if zero_init == 0:
+                dest_decl = self._make_qint_decl(dest_name, size, LiteralExpr(0))
+            elif zero_init == 1 and operands and len(operands) == 1:
+                only = operands[0]
+                only_name = expr_var_name(only)
+                if only_name == dest_name:
+                    for temp in temps_to_release:
+                        self._release_temp(temp)
+                    return self._finish_desugar(stmts, dest_name, dest_decl)
+                call = CallExpr(VarExpr("QAdd"), [only, VarExpr(dest_name)])
+                for temp in temps_to_release:
+                    self._release_temp(temp)
+                return self._finish_desugar(stmts, dest_name, dest_decl, ExprStmt(call))
+            for temp in temps_to_release:
+                self._release_temp(temp)
+            return self._finish_desugar(stmts, dest_name, dest_decl)
+
+        if not simplified_raw:
+            for temp in temps_to_release:
+                self._release_temp(temp)
+            return stmts + [self._make_qint_decl(dest_name, size, LiteralExpr(0))]
+
+        if len(operands) == 1:
+            only = operands[0]
+            only_name = expr_var_name(only)
+            if only_name == dest_name:
+                for temp in temps_to_release:
+                    self._release_temp(temp)
+                return self._finish_desugar(stmts, dest_name, dest_decl)
+            call = CallExpr(VarExpr("QAdd"), [only, VarExpr(dest_name)])
+            for temp in temps_to_release:
+                self._release_temp(temp)
+            return self._finish_desugar(stmts, dest_name, dest_decl, ExprStmt(call))
+
+        call = CallExpr(VarExpr(op_name), operands + [VarExpr(dest_name)])
+        for temp in temps_to_release:
+            self._release_temp(temp)
+        return self._finish_desugar(stmts, dest_name, dest_decl, ExprStmt(call))
+
+    def _finish_desugar(
+        self,
+        stmts: List[Stmt],
+        dest_name: str,
+        dest_decl: QuantumDecl,
+        call_stmt: Optional[ExprStmt] = None,
+    ) -> List[Stmt]:
+        result = list(stmts)
+        if dest_name.startswith("_temp_") and dest_name in self._declared_temps:
+            pass
         else:
-            return [expr]
-    
+            result.append(dest_decl)
+        if call_stmt is not None:
+            result.append(call_stmt)
+        return result
+
+    def _transform_qint_assignment(self, stmt: VarDecl) -> List[Stmt]:
+        if not isinstance(stmt.value, BinaryExpr):
+            return [stmt]
+        size = self._resolve_size(None, stmt.type_hint, stmt.value)
+        return self._desugar_qint_expr(stmt.value, stmt.name, size)
+
+    def _transform_qint_quantum_decl(self, stmt: QuantumDecl) -> List[Stmt]:
+        if not isinstance(stmt.value, BinaryExpr):
+            return [stmt]
+        dynamic = self._has_dynamic_qint_shape(stmt.shape)
+        size = self._resolve_size(stmt.size, None, stmt.value, dynamic_shape=dynamic)
+        stmt.size = size
+        if stmt.shape is not None:
+            for i in range(len(stmt.shape)):
+                stmt.shape[i] = size if len(stmt.shape) == 1 else stmt.shape[i]
+        return self._desugar_qint_expr(stmt.value, stmt.name, size)
+
     def _get_expression_type(self, expr: Expr) -> Optional[str]:
-        """Get the type of an expression"""
         if isinstance(expr, VarExpr):
             return self.symbols.get(expr.name)
-        elif isinstance(expr, IndexExpr):
-            if isinstance(expr.base, VarExpr):
-                base_type = self.symbols.get(expr.base.name)
-                if base_type and base_type.startswith("qint"):
-                    return base_type
+        if isinstance(expr, IndexExpr) and isinstance(expr.base, VarExpr):
+            base_type = self.symbols.get(expr.base.name)
+            if base_type and base_type.startswith("qint"):
+                return base_type
         return None
-    
-    # Visitor methods (required by Visitor interface but not used here)
-    def visit_program(self, node: Program): pass
-    def visit_var_decl(self, node: VarDecl): pass
-    def visit_quantum_decl(self, node: QuantumDecl): pass
-    def visit_func_decl(self, node: FuncDecl): pass
-    def visit_gate_decl(self, node: GateDecl): pass
-    def visit_class_decl(self, node: ClassDecl): pass
-    def visit_for_stmt(self, node: ForStmt): pass
-    def visit_if_stmt(self, node: IfStmt): pass
-    def visit_return_stmt(self, node: ReturnStmt): pass
-    def visit_expr_stmt(self, node: ExprStmt): pass
-    def visit_call_expr(self, node: CallExpr): pass
-    def visit_index_expr(self, node: IndexExpr): pass
-    def visit_binary_expr(self, node: BinaryExpr): pass
-    def visit_unary_expr(self, node: UnaryExpr): pass
-    def visit_var_expr(self, node: VarExpr): pass
-    def visit_literal_expr(self, node: LiteralExpr): pass
-    def visit_list_expr(self, node: ListExpr): pass
-    def visit_group_expr(self, node: GroupExpr): pass
-    def visit_assign_expr(self, node: AssignExpr): pass
+
+    def visit_program(self, node: Program):
+        pass
+
+    def visit_var_decl(self, node: VarDecl):
+        pass
+
+    def visit_quantum_decl(self, node: QuantumDecl):
+        pass
+
+    def visit_func_decl(self, node: FuncDecl):
+        pass
+
+    def visit_gate_decl(self, node: GateDecl):
+        pass
+
+    def visit_class_decl(self, node: ClassDecl):
+        pass
+
+    def visit_for_stmt(self, node: ForStmt):
+        pass
+
+    def visit_if_stmt(self, node: IfStmt):
+        pass
+
+    def visit_return_stmt(self, node: ReturnStmt):
+        pass
+
+    def visit_expr_stmt(self, node: ExprStmt):
+        pass
+
+    def visit_call_expr(self, node: CallExpr):
+        pass
+
+    def visit_index_expr(self, node: IndexExpr):
+        pass
+
+    def visit_binary_expr(self, node: BinaryExpr):
+        pass
+
+    def visit_unary_expr(self, node: UnaryExpr):
+        pass
+
+    def visit_var_expr(self, node: VarExpr):
+        pass
+
+    def visit_literal_expr(self, node: LiteralExpr):
+        pass
+
+    def visit_list_expr(self, node: ListExpr):
+        pass
+
+    def visit_group_expr(self, node: GroupExpr):
+        pass
+
+    def visit_assign_expr(self, node: AssignExpr):
+        pass

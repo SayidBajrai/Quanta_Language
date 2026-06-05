@@ -10,8 +10,7 @@ Real quantum hardware cannot reveal amplitudes; this is statevector simulation o
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Any, Optional, Tuple
-from fractions import Fraction
+from typing import Dict, List, Any, Tuple, Optional
 
 try:
     from qiskit import QuantumCircuit
@@ -23,115 +22,40 @@ except ImportError:
 from ..ast.nodes import (
     Program, Stmt, Expr,
     VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
-    ForStmt, IfStmt, ReturnStmt, ExprStmt,
+    ForStmt, IfStmt, ExprStmt,
     CallExpr, IndexExpr, BinaryExpr, UnaryExpr,
-    VarExpr, LiteralExpr, ListExpr, GroupExpr, AssignExpr,
+    VarExpr, LiteralExpr, ListExpr, GroupExpr, FStringExpr, AssignExpr,
 )
 from ..errors import QuantaError
+from .formatting import (
+    CircuitTraceEntry,
+    FormatContext,
+    _canonical_gate_name,
+    format_print_argument,
+    gate_trace_display,
+    statevector_to_symbolic,
+)
+from .quantum_metrics import compute_fidelity
+from .tensor_algebra import (
+    cross_product,
+    dot_product,
+    elementwise_product,
+    tensor_product,
+    tensor_shape,
+    tensor_elementwise_binop,
+)
+from .tensors import (
+    eval_literal_value,
+    get_tensor_index,
+    reshape_runtime,
+)
+from ..types.tensor import TensorType, allocate_tensor, infer_shape, validate_shape
+from ..sema.typecheck import tensor_type_from_decl, tensor_type_from_quantum
 
-# Max qubits for statevector simulation (2^n memory)
-SIMULATION_QUBIT_LIMIT = 20
+# Re-export for backward compatibility
+__all__ = ["get_prints", "statevector_to_symbolic"]
 
-
-def _rationalize_amplitude(amp: complex, tol: float = 1e-9) -> Optional[Tuple[float, Optional[int], str]]:
-    """
-    Try to express amplitude as rational/sqrt form.
-    Returns (magnitude, sqrt_denom or None, phase_str) or None if not recognizable.
-    """
-    if abs(amp) < tol:
-        return None
-    phase = math.atan2(amp.imag, amp.real)
-    mag = abs(amp)
-    # Check for 1/sqrt(2)
-    inv_sqrt2 = 1.0 / math.sqrt(2)
-    if abs(mag - inv_sqrt2) < tol:
-        phase_str = ""
-        if abs(phase - 0) < tol:
-            pass
-        elif abs(phase - math.pi) < tol:
-            phase_str = "-"
-        elif abs(phase - math.pi/2) < tol:
-            phase_str = "i"
-        elif abs(phase + math.pi/2) < tol:
-            phase_str = "-i"
-        else:
-            phase_str = f"e^(i{phase:.2g})"
-        return (mag, 2, phase_str)
-    # Check for 1/2
-    if abs(mag - 0.5) < tol:
-        phase_str = "-" if abs(phase - math.pi) < tol else ""
-        return (mag, None, phase_str)
-    if abs(mag - 1.0) < tol:
-        phase_str = "-" if abs(phase - math.pi) < tol else ""
-        return (mag, None, phase_str)
-    return (mag, None, f"e^(i{phase:.2g})" if abs(phase) > tol else "")
-
-
-def _format_ket(n: int, num_qubits: int) -> str:
-    """Format basis state as |n⟩ in binary."""
-    b = format(n, f"0{num_qubits}b")
-    return "|" + b + ">"
-
-
-def statevector_to_symbolic(statevector: "Statevector", num_qubits_show: Optional[int] = None) -> str:
-    """
-    Convert statevector to symbolic form like 1/√2 * |0> + 1/√2 * |1>.
-    statevector is the full state; num_qubits_show is only used for ket width when showing full state.
-    """
-    if not QISKIT_AVAILABLE:
-        return "<statevector (qiskit not available)>"
-    sv = statevector
-    dim = sv.dim
-    num_qubits = num_qubits_show if num_qubits_show is not None else int(round(math.log2(dim)))
-    if dim == 0:
-        return "|0>"
-    data = sv.data
-    terms = []
-    for n in range(dim):
-        amp = data[n]
-        if abs(amp) < 1e-9:
-            continue
-        r = _rationalize_amplitude(amp)
-        if r is None:
-            terms.append(f"({amp.real:.4g}+{amp.imag:.4g}i)*{_format_ket(n, num_qubits)}")
-            continue
-        mag, sqrt_denom, phase_str = r
-        if sqrt_denom == 2:
-            coeff = "1/sqrt(2)"
-        elif sqrt_denom is not None:
-            coeff = f"1/sqrt({sqrt_denom})"
-        else:
-            if abs(mag - 1.0) < 1e-9:
-                coeff = "" if not phase_str else phase_str
-            else:
-                coeff = f"{mag:.4g}"
-                if phase_str:
-                    coeff = phase_str + coeff
-        if coeff and not coeff.endswith("*"):
-            coeff = coeff + " * "
-        ket = _format_ket(n, num_qubits)
-        terms.append(f"{coeff}{ket}")
-    if not terms:
-        return "0"
-    return " + ".join(terms)
-
-
-def _check_entangled(statevector: "Statevector", qubit_indices: List[int]) -> bool:
-    """Check if the given qubits are entangled with the rest."""
-    if statevector.num_qubits <= 1 or not qubit_indices:
-        return False
-    try:
-        from qiskit.quantum_info import partial_trace
-        other = [i for i in range(statevector.num_qubits) if i not in qubit_indices]
-        if not other:
-            return False
-        rho = partial_trace(statevector, other)
-        # Check purity: Tr(rho^2) < 1 means mixed (entangled)
-        rho2 = rho @ rho
-        purity = float(rho2.trace().real)
-        return purity < 0.99
-    except Exception:
-        return False
+SIMULATION_QBIT_LIMIT = 20
 
 
 def get_prints(quanta_code: str) -> str:
@@ -144,15 +68,13 @@ def get_prints(quanta_code: str) -> str:
 
     - print(classical): immediate evaluation, append to output.
     - print(quantum): inspect statevector, append symbolic summary (no state collapse).
-
-    Raises:
-        RuntimeError: If total qubits > SIMULATION_QUBIT_LIMIT (default 20).
-        QuantaError: On parse/semantic errors.
+    - Print(obj) and Print(f"{obj}") share the same object-to-string conversion path.
     """
     from ..lexer.lexer import Lexer
     from ..parser.parser import Parser
     from ..sema.transform import ASTTransformer
     from ..sema.validation import SemanticAnalyzer
+    from ..sema.indexing import IndexExpander, collect_registers
 
     if not QISKIT_AVAILABLE:
         raise ImportError(
@@ -169,13 +91,17 @@ def get_prints(quanta_code: str) -> str:
     ast = parser.parse(tokens)
     ast = transformer.transform(ast)
     sema.analyze(ast)
+    registers = collect_registers(ast)
+    ast = IndexExpander(registers).expand_program(ast)
 
-    # Build qubit map and check limit
-    qubit_map: Dict[Tuple[str, int], int] = {}  # (reg_name, index) -> global qubit index
-    classical_map: Dict[Tuple[str, int], int] = {}  # (reg_name, index) -> value 0/1
+    qbit_map: Dict[Tuple[str, int], int] = {}
+    classical_map: Dict[Tuple[str, int], int] = {}
     reg_sizes: Dict[str, int] = {}
-    reg_kind: Dict[str, str] = {}  # "qubit" | "bit" | "qint" | "bint"
-    global_qubit = 0
+    reg_shapes: Dict[str, List[int]] = {}
+    reg_kind: Dict[str, str] = {}
+    var_types: Dict[str, TensorType] = {}
+    tensor_shapes: Dict[str, List[int]] = {}
+    global_qbit = 0
     for stmt in ast.statements:
         if isinstance(stmt, QuantumDecl):
             if stmt.kind == "qdec" and stmt.size is not None and stmt.size2 is not None:
@@ -184,26 +110,40 @@ def get_prints(quanta_code: str) -> str:
                 size = 1 + stmt.size + stmt.size2
             else:
                 size = stmt.size or 1
+            shape = [d if d is not None else 1 for d in (stmt.shape or [size])]
             reg_sizes[stmt.name] = size
+            reg_shapes[stmt.name] = shape
             reg_kind[stmt.name] = stmt.kind
-            if stmt.kind in ("qubit", "qint", "qdec", "qfloat"):
+            if stmt.kind in ("qbit", "qint", "qdec", "qfloat"):
                 for i in range(size):
-                    qubit_map[(stmt.name, i)] = global_qubit
-                    global_qubit += 1
+                    qbit_map[(stmt.name, i)] = global_qbit
+                    global_qbit += 1
             elif stmt.kind in ("bit", "bint"):
                 for i in range(size):
                     classical_map[(stmt.name, i)] = 0
+                    if stmt.value and isinstance(stmt.value, LiteralExpr):
+                        try:
+                            init_val = int(stmt.value.value)
+                            classical_map[(stmt.name, i)] = (init_val >> i) & 1
+                        except (ValueError, TypeError):
+                            pass
 
-    if global_qubit > SIMULATION_QUBIT_LIMIT:
+    if global_qbit > SIMULATION_QBIT_LIMIT:
         raise RuntimeError(
-            f"Simulation qubit limit exceeded: {global_qubit} qubits "
-            f"(max {SIMULATION_QUBIT_LIMIT}). Statevector uses 2^n memory."
+            f"Simulation qbit limit exceeded: {global_qbit} qbits "
+            f"(max {SIMULATION_QBIT_LIMIT}). Statevector uses 2^n memory."
         )
 
-    circuit = QuantumCircuit(global_qubit)
+    circuit = QuantumCircuit(global_qbit)
     output_lines: List[str] = []
+    execution_trace: List[CircuitTraceEntry] = []
     gates = {stmt.name: stmt for stmt in ast.statements if isinstance(stmt, GateDecl)}
     constants_eval: Dict[str, Any] = {"pi": math.pi, "e": math.e}
+    for stmt in ast.statements:
+        if isinstance(stmt, VarDecl):
+            var_types[stmt.name] = tensor_type_from_decl(stmt)
+        if isinstance(stmt, QuantumDecl):
+            var_types[stmt.name] = tensor_type_from_quantum(stmt)
 
     def eval_expr(expr: Expr, ctx: Dict[str, Any]) -> Any:
         if isinstance(expr, LiteralExpr):
@@ -213,91 +153,186 @@ def get_prints(quanta_code: str) -> str:
             if isinstance(v, str) and v.replace(".", "").replace("-", "").isdigit():
                 return float(v)
             return v
+        if isinstance(expr, FStringExpr):
+            fmt_ctx = FormatContext(
+                circuit=circuit,
+                qbit_map=qbit_map,
+                classical_map=classical_map,
+                reg_sizes=reg_sizes,
+                reg_kind=reg_kind,
+                eval_ctx=ctx,
+                eval_expr=eval_expr,
+                execution_trace=execution_trace,
+            )
+            return format_print_argument(expr, fmt_ctx)
         if isinstance(expr, VarExpr):
             return ctx.get(expr.name)
         if isinstance(expr, GroupExpr):
             return eval_expr(expr.expr, ctx)
+        if isinstance(expr, AssignExpr):
+            value = eval_expr(expr.value, ctx)
+            ctx[expr.name] = value
+            if isinstance(value, list):
+                tensor_shapes[expr.name] = infer_shape(value)
+            return value
         if isinstance(expr, BinaryExpr):
             l = eval_expr(expr.left, ctx)
             r = eval_expr(expr.right, ctx)
-            if expr.op == "+": return l + r
-            if expr.op == "-": return l - r
-            if expr.op == "*": return l * r
-            if expr.op == "/": return l / r
-            if expr.op == "==": return l == r
-            if expr.op == "!=": return l != r
-            if expr.op == "<": return l < r
-            if expr.op == ">": return l > r
-            if expr.op == "<=": return l <= r
-            if expr.op == ">=": return l >= r
-            if expr.op == "&&": return l and r
-            if expr.op == "||": return l or r
+            if isinstance(l, list) or isinstance(r, list):
+                return tensor_elementwise_binop(l, r, expr.op)
+            if expr.op == "+":
+                return l + r
+            if expr.op == "-":
+                return l - r
+            if expr.op == "*":
+                return l * r
+            if expr.op == "/":
+                return l / r
+            if expr.op == "==":
+                return l == r
+            if expr.op == "!=":
+                return l != r
+            if expr.op == "<":
+                return l < r
+            if expr.op == ">":
+                return l > r
+            if expr.op == "<=":
+                return l <= r
+            if expr.op == ">=":
+                return l >= r
+            if expr.op == "&&":
+                return l and r
+            if expr.op == "||":
+                return l or r
         if isinstance(expr, UnaryExpr):
             r = eval_expr(expr.right, ctx)
-            if expr.op == "-": return -r
-            if expr.op == "!": return not r
+            if expr.op == "-":
+                return -r
+            if expr.op == "!":
+                return not r
         if isinstance(expr, ListExpr):
             el = expr.elements
-            if len(el) == 3:
-                # Range [start:end] or [start:step:end]
+            if expr.is_range_syntax and len(el) == 3:
                 start = eval_expr(el[0], ctx)
                 step = eval_expr(el[1], ctx)
                 end = eval_expr(el[2], ctx)
                 return list(range(int(start), int(end), int(step)))
             return [eval_expr(e, ctx) for e in el]
         if isinstance(expr, IndexExpr):
+            root = expr.base
+            while isinstance(root, IndexExpr):
+                root = root.base
+            if isinstance(root, VarExpr) and root.name in ctx:
+                value = ctx.get(root.name)
+                shape = tensor_shapes.get(root.name)
+                if isinstance(value, list) and shape:
+                    return get_tensor_index(value, expr, shape)
             base = eval_expr(expr.base, ctx)
+            if isinstance(expr.base, VarExpr) and expr.base.name in reg_kind:
+                if expr.is_simple():
+                    idx = eval_expr(expr.index, ctx)
+                    if isinstance(idx, int):
+                        if (expr.base.name, idx) in classical_map:
+                            return classical_map[(expr.base.name, idx)]
+                        if (expr.base.name, idx) in qbit_map:
+                            return (expr.base.name, idx)
+                return None
+            if not expr.is_simple():
+                return None
             idx = eval_expr(expr.index, ctx)
             if isinstance(idx, int) and isinstance(base, str):
                 if (base, idx) in classical_map:
                     return classical_map[(base, idx)]
-                if (base, idx) in qubit_map:
+                if (base, idx) in qbit_map:
                     return (base, idx)
             return None
+        if isinstance(expr, CallExpr) and isinstance(expr.callee, VarExpr):
+            name = expr.callee.name
+            if name == "Reshape" and len(expr.args) >= 2:
+                tensor = eval_expr(expr.args[0], ctx)
+                new_shape = [int(eval_expr(a, ctx)) for a in expr.args[1:]]
+                return reshape_runtime(tensor, new_shape)
+            if name == "Fidelity" and len(expr.args) == 2:
+                fmt_ctx = FormatContext(
+                    circuit=circuit,
+                    qbit_map=qbit_map,
+                    classical_map=classical_map,
+                    reg_sizes=reg_sizes,
+                    reg_kind=reg_kind,
+                    eval_ctx=ctx,
+                    eval_expr=eval_expr,
+                    execution_trace=execution_trace,
+                )
+                return compute_fidelity(expr.args[0], expr.args[1], fmt_ctx)
+            if name == "DotProduct" and len(expr.args) == 2:
+                return dot_product(eval_expr(expr.args[0], ctx), eval_expr(expr.args[1], ctx))
+            if name == "CrossProduct" and len(expr.args) == 2:
+                return cross_product(eval_expr(expr.args[0], ctx), eval_expr(expr.args[1], ctx))
+            if name == "ElementwiseProduct" and len(expr.args) == 2:
+                return elementwise_product(
+                    eval_expr(expr.args[0], ctx), eval_expr(expr.args[1], ctx)
+                )
+            if name == "TensorProduct" and len(expr.args) == 2:
+                return tensor_product(eval_expr(expr.args[0], ctx), eval_expr(expr.args[1], ctx))
+            if name == "Shape" and len(expr.args) == 1:
+                return tensor_shape(eval_expr(expr.args[0], ctx))
         return None
 
-    def apply_gate(name: str, args: List[Expr], ctx: Dict[str, Any]) -> None:
+    def _append_trace(
+        entry: CircuitTraceEntry, trace_children: Optional[List[CircuitTraceEntry]] = None
+    ) -> None:
+        if trace_children is not None:
+            trace_children.append(entry)
+        else:
+            execution_trace.append(entry)
+
+    def apply_gate(
+        name: str,
+        args: List[Expr],
+        ctx: Dict[str, Any],
+        trace_children: Optional[List[CircuitTraceEntry]] = None,
+    ) -> None:
         name_lower = name.lower()
         qubits = []
         params = []
         for a in args:
-            if isinstance(a, VarExpr) and reg_kind.get(a.name, "") in ("qubit", "qint", "qdec", "qfloat"):
-                # Full register: all indices
+            if isinstance(a, VarExpr) and reg_kind.get(a.name, "") in ("qbit", "qint", "qdec", "qfloat"):
                 sz = reg_sizes.get(a.name, 1)
-                qubits.extend([qubit_map[(a.name, i)] for i in range(sz)])
+                qubits.extend([qbit_map[(a.name, i)] for i in range(sz)])
             elif isinstance(a, IndexExpr) and isinstance(a.base, VarExpr):
                 idx = eval_expr(a.index, ctx)
                 if isinstance(idx, int):
                     key = (a.base.name, idx)
-                    if key in qubit_map:
-                        qubits.append(qubit_map[key])
-                    elif key in classical_map:
-                        pass  # classical, skip
+                    if key in qbit_map:
+                        qubits.append(qbit_map[key])
             elif isinstance(a, LiteralExpr):
                 try:
                     params.append(float(a.value))
                 except (ValueError, TypeError):
                     pass
-        if name_lower in ("h", "x", "y", "z") and len(qubits) >= 1:
-            for q in qubits:
-                if name_lower == "h": circuit.h(q)
-                elif name_lower == "x": circuit.x(q)
-                elif name_lower == "y": circuit.y(q)
-                elif name_lower == "z": circuit.z(q)
-        elif name_lower in ("cx", "cnot") and len(qubits) == 2:
-            circuit.cx(qubits[0], qubits[1])
-        elif name_lower == "cz" and len(qubits) == 2:
-            circuit.cz(qubits[0], qubits[1])
-        elif name_lower == "swap" and len(qubits) == 2:
-            circuit.swap(qubits[0], qubits[1])
-        elif name_lower in ("rz", "ry", "rx") and len(params) >= 1 and len(qubits) >= 1:
-            theta = params[0]
-            for q in qubits:
-                if name_lower == "rz": circuit.rz(theta, q)
-                elif name_lower == "ry": circuit.ry(theta, q)
-                elif name_lower == "rx": circuit.rx(theta, q)
-        elif name in gates:
+
+        if name in gates:
             gate_def = gates[name]
+            fmt_ctx = FormatContext(
+                circuit=circuit,
+                qbit_map=qbit_map,
+                classical_map=classical_map,
+                reg_sizes=reg_sizes,
+                reg_kind=reg_kind,
+                eval_ctx=ctx,
+                eval_expr=eval_expr,
+                execution_trace=execution_trace,
+            )
+            display, trace_qubits = gate_trace_display(name, args, fmt_ctx, ctx)
+            children: List[CircuitTraceEntry] = []
+            macro_entry = CircuitTraceEntry(
+                name=name,
+                display=display,
+                global_qbits=trace_qubits,
+                children=children,
+                is_macro=True,
+            )
+            _append_trace(macro_entry, trace_children)
             param_bind = {gate_def.params[i]: args[i] for i in range(len(args))}
             for s in gate_def.body:
                 if isinstance(s, ExprStmt) and isinstance(s.expr, CallExpr):
@@ -307,24 +342,90 @@ def get_prints(quanta_code: str) -> str:
                         for a in s.expr.args
                     ]
                     if isinstance(sub_callee, VarExpr):
-                        apply_gate(sub_callee.name, sub_args, ctx)
+                        apply_gate(sub_callee.name, sub_args, ctx, children)
+            return
+
+        fmt_ctx = FormatContext(
+            circuit=circuit,
+            qbit_map=qbit_map,
+            classical_map=classical_map,
+            reg_sizes=reg_sizes,
+            reg_kind=reg_kind,
+            eval_ctx=ctx,
+            eval_expr=eval_expr,
+            execution_trace=execution_trace,
+        )
+        display, trace_qubits = gate_trace_display(name, args, fmt_ctx, ctx)
+        if trace_qubits:
+            qubits = trace_qubits
+        gate_entry = CircuitTraceEntry(
+            name=_canonical_gate_name(name),
+            display=display,
+            global_qbits=qubits,
+        )
+        _append_trace(gate_entry, trace_children)
+
+        if name_lower in ("h", "x", "y", "z") and len(qubits) >= 1:
+            for q in qubits:
+                if name_lower == "h":
+                    circuit.h(q)
+                elif name_lower == "x":
+                    circuit.x(q)
+                elif name_lower == "y":
+                    circuit.y(q)
+                elif name_lower == "z":
+                    circuit.z(q)
+        elif name_lower in ("cx", "cnot") and len(qubits) == 2:
+            circuit.cx(qubits[0], qubits[1])
+        elif name_lower == "cz" and len(qubits) == 2:
+            circuit.cz(qubits[0], qubits[1])
+        elif name_lower == "swap" and len(qubits) == 2:
+            circuit.swap(qubits[0], qubits[1])
+        elif name_lower in ("rz", "ry", "rx") and len(params) >= 1 and len(qubits) >= 1:
+            theta = params[0]
+            for q in qubits:
+                if name_lower == "rz":
+                    circuit.rz(theta, q)
+                elif name_lower == "ry":
+                    circuit.ry(theta, q)
+                elif name_lower == "rx":
+                    circuit.rx(theta, q)
 
     def run_statement(stmt: Stmt, ctx: Dict[str, Any]) -> None:
         if isinstance(stmt, QuantumDecl):
-            size = stmt.size or 1
-            if stmt.kind in ("qubit", "qint") and stmt.value:
+            if stmt.kind == "qdec" and stmt.size is not None and stmt.size2 is not None:
+                size = stmt.size + stmt.size2
+            elif stmt.kind == "qfloat" and stmt.size is not None and stmt.size2 is not None:
+                size = 1 + stmt.size + stmt.size2
+            else:
+                size = stmt.size or 1
+            if stmt.kind in ("qbit", "qint", "qdec", "qfloat") and stmt.value:
                 if isinstance(stmt.value, LiteralExpr):
                     try:
                         val = int(stmt.value.value)
                         for i in range(size):
                             if (val >> i) & 1:
-                                circuit.x(qubit_map[(stmt.name, i)])
+                                circuit.x(qbit_map[(stmt.name, i)])
                     except (ValueError, TypeError):
                         pass
-        elif isinstance(stmt, VarDecl) and stmt.value:
-            v = eval_expr(stmt.value, ctx)
-            if v is not None:
-                ctx[stmt.name] = v
+        elif isinstance(stmt, VarDecl):
+            tensor_type = tensor_type_from_decl(stmt)
+            if stmt.value is not None:
+                v = eval_expr(stmt.value, ctx)
+                if v is not None:
+                    if tensor_type.rank > 0 and isinstance(v, list):
+                        if tensor_type.is_dynamic:
+                            shape = validate_shape(v, tensor_type.dimensions, stmt.name)
+                            tensor_shapes[stmt.name] = list(shape)
+                        else:
+                            tensor_shapes[stmt.name] = infer_shape(v)
+                        ctx[stmt.name] = v
+                    else:
+                        ctx[stmt.name] = v
+            elif tensor_type.rank > 0 and tensor_type.shape():
+                allocated = allocate_tensor(tensor_type.base, list(tensor_type.shape()))
+                ctx[stmt.name] = allocated
+                tensor_shapes[stmt.name] = list(tensor_type.shape())
         elif isinstance(stmt, ConstDecl):
             v = eval_expr(stmt.value, ctx)
             if v is not None:
@@ -336,96 +437,49 @@ def get_prints(quanta_code: str) -> str:
                 ctx[stmt.name] = v
         elif isinstance(stmt, ExprStmt):
             expr = stmt.expr
+            if isinstance(expr, AssignExpr):
+                eval_expr(expr, ctx)
+                return
             if isinstance(expr, CallExpr) and isinstance(expr.callee, VarExpr):
                 name = expr.callee.name
                 if name in ("Print", "print"):
                     if not expr.args:
                         output_lines.append("")
                         return
+                    fmt_ctx = FormatContext(
+                        circuit=circuit,
+                        qbit_map=qbit_map,
+                        classical_map=classical_map,
+                        reg_sizes=reg_sizes,
+                        reg_kind=reg_kind,
+                        eval_ctx=ctx,
+                        eval_expr=eval_expr,
+                        execution_trace=execution_trace,
+                    )
                     arg = expr.args[0]
-                    if isinstance(arg, VarExpr):
-                        if arg.name in reg_kind:
-                            kind = reg_kind[arg.name]
-                            if kind in ("bit", "bint"):
-                                size = reg_sizes.get(arg.name, 1)
-                                vals = [classical_map.get((arg.name, i), 0) for i in range(size)]
-                                output_lines.append(str(vals))
-                            else:
-                                indices = [qubit_map[(arg.name, i)] for i in range(reg_sizes.get(arg.name, 1))]
-                                sv = Statevector(circuit)
-                                if _check_entangled(sv, indices) and len(indices) < sv.num_qubits:
-                                    full = statevector_to_symbolic(sv, num_qubits_show=sv.num_qubits)
-                                    output_lines.append(f"Subsystem entangled. |q,q2> = {full}")
-                                else:
-                                    if len(indices) < sv.num_qubits:
-                                        from qiskit.quantum_info import partial_trace, purity
-                                        other = [i for i in range(sv.num_qubits) if i not in indices]
-                                        rho = partial_trace(sv, other)
-                                        p = purity(rho)
-                                        if p > 0.99:
-                                            import numpy as np
-                                            evals, evecs = np.linalg.eigh(rho.data)
-                                            idx_max = np.argmax(evals)
-                                            reduced_sv = Statevector(evecs[:, idx_max])
-                                            output_lines.append(statevector_to_symbolic(reduced_sv, len(indices)))
-                                        else:
-                                            output_lines.append(
-                                                "Subsystem entangled. " + statevector_to_symbolic(sv, sv.num_qubits)
-                                            )
-                                    else:
-                                        output_lines.append(statevector_to_symbolic(sv, sv.num_qubits))
+                    if isinstance(arg, FStringExpr):
+                        output_lines.append(format_print_argument(arg, fmt_ctx))
+                    elif isinstance(arg, VarExpr) and arg.name in reg_kind:
+                        output_lines.append(format_print_argument(arg, fmt_ctx))
+                    elif isinstance(arg, IndexExpr):
+                        root = arg.base
+                        while isinstance(root, IndexExpr):
+                            root = root.base
+                        if isinstance(root, VarExpr) and root.name in reg_kind:
+                            output_lines.append(format_print_argument(arg, fmt_ctx))
                         else:
-                            output_lines.append(str(ctx.get(arg.name, "")))
-                        return
-                    if isinstance(arg, IndexExpr) and isinstance(arg.base, VarExpr):
-                        idx = eval_expr(arg.index, ctx)
-                        if isinstance(idx, int):
-                            key = (arg.base.name, idx)
-                            if key in classical_map:
-                                output_lines.append(str(classical_map[key]))
-                                return
-                            if key in qubit_map:
-                                sv = Statevector(circuit)
-                                one_idx = [qubit_map[key]]
-                                if _check_entangled(sv, one_idx):
-                                    full = statevector_to_symbolic(sv, sv.num_qubits)
-                                    output_lines.append(f"Subsystem entangled. Full state: {full}")
-                                else:
-                                    from qiskit.quantum_info import partial_trace, purity
-                                    other = [i for i in range(sv.num_qubits) if i not in one_idx]
-                                    rho = partial_trace(sv, other)
-                                    if purity(rho) > 0.99:
-                                        import numpy as np
-                                        evals, evecs = np.linalg.eigh(rho.data)
-                                        idx_max = np.argmax(evals)
-                                        reduced_sv = Statevector(evecs[:, idx_max])
-                                        output_lines.append(statevector_to_symbolic(reduced_sv, 1))
-                                    else:
-                                        output_lines.append(statevector_to_symbolic(sv, sv.num_qubits))
-                                return
-                    v = eval_expr(arg, ctx)
-                    output_lines.append(str(v))
+                            val = eval_expr(arg, ctx)
+                            output_lines.append(str(val) if val is not None else "")
+                    else:
+                        val = eval_expr(arg, ctx)
+                        output_lines.append(
+                            str(val) if val is not None else format_print_argument(arg, fmt_ctx)
+                        )
                     return
                 if name == "Measure" and len(expr.args) == 2:
-                    # Measure qubit(s) -> classical bit(s): single Measure(q[i], c[i]) or full register Measure(q, c)
                     qarg, carg = expr.args[0], expr.args[1]
-                    if isinstance(qarg, VarExpr) and isinstance(carg, VarExpr):
-                        q_name, c_name = qarg.name, carg.name
-                        q_sz = reg_sizes.get(q_name, 0)
-                        c_sz = reg_sizes.get(c_name, 0)
-                        for i in range(min(q_sz, c_sz)):
-                            qkey = (q_name, i)
-                            ckey = (c_name, i)
-                            if qkey in qubit_map and ckey in classical_map:
-                                sv = Statevector(circuit)
-                                qidx = qubit_map[qkey]
-                                probs = sv.probabilities([qidx])
-                                import random
-                                r = random.random()
-                                outcome = 1 if r < probs[1] else 0
-                                classical_map[ckey] = outcome
-                        return
-                    qkey = ckey = None
+                    qkey = None
+                    ckey = None
                     if isinstance(qarg, IndexExpr) and isinstance(qarg.base, VarExpr):
                         qi = eval_expr(qarg.index, ctx)
                         if isinstance(qi, int):
@@ -434,11 +488,17 @@ def get_prints(quanta_code: str) -> str:
                         ci = eval_expr(carg.index, ctx)
                         if isinstance(ci, int):
                             ckey = (carg.base.name, ci)
-                    if qkey is not None and ckey is not None and qkey in qubit_map and ckey in classical_map:
+                    if (
+                        qkey is not None
+                        and ckey is not None
+                        and qkey in qbit_map
+                        and ckey in classical_map
+                    ):
                         sv = Statevector(circuit)
-                        qidx = qubit_map[qkey]
+                        qidx = qbit_map[qkey]
                         probs = sv.probabilities([qidx])
                         import random
+
                         r = random.random()
                         outcome = 1 if r < probs[1] else 0
                         classical_map[ckey] = outcome

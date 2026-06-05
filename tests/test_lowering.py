@@ -9,15 +9,11 @@ from quanta import compile
 def test_bell_state():
     """Test Bell state compilation"""
     source = """
-qubit[2] q;
+qbit[2] q;
 bit[2] c;
 
-func bell(a, b) {
-    H(a);
-    CNot(a, b);
-}
-
-bell(q[0], q[1]);
+H(q[0]);
+CNot(q[0], q[1]);
 Measure(q[0], c[0]);
 """
     qasm = compile(source)
@@ -31,7 +27,7 @@ Measure(q[0], c[0]);
 def test_simple_gates():
     """Test simple gate compilation"""
     source = """
-qubit[1] q;
+qbit[1] q;
 H(q[0]);
 X(q[0]);
 """
@@ -44,7 +40,7 @@ X(q[0]);
 def test_measure_registers():
     """Test Measure(q, c) with full registers"""
     source = """
-qubit[2] q
+qbit[2] q
 bit[2] c
 Measure(q, c)
 """
@@ -52,3 +48,34 @@ Measure(q, c)
     
     assert "measure q[0] -> c[0]" in qasm.lower()
     assert "measure q[1] -> c[1]" in qasm.lower()
+
+
+def test_qdec_declaration():
+    """Test qdec fixed-point register lowering"""
+    source = """
+qdec[4, 4] x;
+"""
+    qasm = compile(source)
+    assert "qubit[8] x" in qasm
+
+
+def test_qfloat_declaration():
+    """Test qfloat register lowering"""
+    source = """
+qfloat[5, 10] y;
+"""
+    qasm = compile(source)
+    assert "qubit[16] y" in qasm
+
+
+def test_high_level_bell_gate():
+    """Test Bell high-level gate lowering"""
+    source = """
+qbit[2] q0;
+qbit[2] q1;
+Bell(q0[0], q1[0]);
+"""
+    qasm = compile(source)
+    qasm_lower = qasm.lower()
+    assert "h q0[0]" in qasm_lower
+    assert "cx q0[0], q1[0]" in qasm_lower

@@ -10,7 +10,7 @@ from quanta.parser.parser import Parser
 def test_parse_simple_program():
     """Test parsing a simple program"""
     source = """
-qubit[2] q;
+qbit[2] q;
 bit[2] c;
 H(q[0]);
 """
