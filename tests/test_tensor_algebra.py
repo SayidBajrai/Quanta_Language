@@ -25,7 +25,7 @@ def test_dot_product_operator():
 float[3] a = [1.0, 2.0, 3.0]
 float[3] b = [4.0, 5.0, 6.0]
 float dot_ab = a . b
-print(dot_ab)
+Print(dot_ab)
 """
     assert get_prints(source) == "32.0"
 
@@ -79,7 +79,7 @@ def test_shape_builtin():
 float[3][3] A = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
 float[3][3] B = [[9, 8, 7], [6, 5, 4], [3, 2, 1]]
 float[9][9] kron = TensorProduct(A, B)
-print(Shape(kron))
+Print(Shape(kron))
 """
     assert get_prints(source) == "(9, 9)"
 
@@ -98,9 +98,9 @@ float[3] x = [1, 0, 1]
 float y0 = DotProduct(W[0,:], x)
 float y1 = DotProduct(W[1,:], x)
 float y2 = DotProduct(W[2,:], x)
-print(y0)
-print(y1)
-print(y2)
+Print(y0)
+Print(y1)
+Print(y2)
 """
     assert get_prints(source) == "0.8\n0.6\n1.6"
 

@@ -7,6 +7,7 @@ from typing import List, Optional, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..types.tensor import TensorType
+    from ..docs.comment_parser import ParsedDocComment
 
 
 class Node(ABC):
@@ -139,6 +140,7 @@ class FuncDecl(Stmt):
         param_specs: Optional[List["ParamSpec"]] = None,
         return_kind: Optional[str] = None,
         return_size: Optional[int] = None,
+        doc: Optional["ParsedDocComment"] = None,
     ):
         self.name = name
         self.params = params
@@ -147,15 +149,23 @@ class FuncDecl(Stmt):
         self.return_size = return_size
         self.param_specs = param_specs or [ParamSpec("qbit", p) for p in params]
         self.body = body
+        self.doc = doc
 
 
 class GateDecl(Stmt):
     """Gate macro declaration (compile-time circuit composition)"""
     
-    def __init__(self, name: str, params: List[str], body: List[Stmt]):
+    def __init__(
+        self,
+        name: str,
+        params: List[str],
+        body: List[Stmt],
+        doc: Optional["ParsedDocComment"] = None,
+    ):
         self.name = name
         self.params = params
         self.body = body
+        self.doc = doc
 
 
 class ClassDecl(Stmt):
@@ -208,12 +218,20 @@ class ExprStmt(Stmt):
 
 class CallExpr(Expr):
     """Function/gate call expression"""
-    
-    def __init__(self, callee: Expr, args: List[Expr], modifiers: Optional[List[str]] = None, ctrl_count: Optional[int] = None):
+
+    def __init__(
+        self,
+        callee: Expr,
+        args: List[Expr],
+        modifiers: Optional[List[str]] = None,
+        ctrl_count: Optional[int] = None,
+        resolved_func: Optional["FuncDecl"] = None,
+    ):
         self.callee = callee
         self.args = args
         self.modifiers = modifiers or []  # List of "ctrl" and/or "inv"
         self.ctrl_count = ctrl_count  # Number of control qbits for ctrl[n]
+        self.resolved_func = resolved_func  # Set by semantic analysis for overloads
 
 
 class IndexItem(Node):

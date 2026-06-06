@@ -160,9 +160,8 @@ QMult(a, b, c, out)
 
     qasm = compile(source)
 
-    assert "Variadic multiplication: would multiply" not in qasm
-
-    assert qasm.lower().count("quantum multiplier") >= 2
+    assert "QMult shift-and-add" in qasm
+    assert "mcx" in qasm
 
 
 

@@ -78,6 +78,7 @@ class TokenType(Enum):
     # Special
     EOF = "EOF"
     NEWLINE = "NEWLINE"
+    DOC_COMMENT = "DOC_COMMENT"
 
 
 @dataclass
@@ -143,6 +144,10 @@ class Lexer:
             if self._is_at_end():
                 break
             
+            if self._match("///"):
+                self.tokens.append(self._doc_comment())
+                continue
+
             if self._match("//"):
                 self._skip_line_comment()
                 continue
@@ -228,6 +233,56 @@ class Lexer:
         
         return None
     
+    _ESCAPE_CHARS = {
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+        "a": "\a",
+        "b": "\b",
+        "f": "\f",
+        "v": "\v",
+        "0": "\0",
+        "\\": "\\",
+        '"': '"',
+        "'": "'",
+        "{": "{",
+        "}": "}",
+    }
+
+    def _read_hex_digits(self, count: int, line: int, column: int) -> str:
+        """Read exactly `count` hexadecimal digits for \\x / \\u / \\U escapes."""
+        from ..errors import QuantaSyntaxError
+
+        digits = ""
+        for _ in range(count):
+            if self._is_at_end() or self._peek().lower() not in "0123456789abcdef":
+                raise QuantaSyntaxError("Invalid hex escape sequence", line, column)
+            digits += self._advance()
+        return digits
+
+    def _decode_string_escape(self) -> str:
+        """Decode a backslash escape sequence; the backslash is already consumed."""
+        from ..errors import QuantaSyntaxError
+
+        if self._is_at_end():
+            raise QuantaSyntaxError("Incomplete escape sequence", self.line, self.column)
+
+        esc_line = self.line
+        esc_col = self.column
+        ch = self._advance()
+        if ch in self._ESCAPE_CHARS:
+            return self._ESCAPE_CHARS[ch]
+        if ch == "x":
+            code = int(self._read_hex_digits(2, esc_line, esc_col), 16)
+            return chr(code)
+        if ch == "u":
+            code = int(self._read_hex_digits(4, esc_line, esc_col), 16)
+            return chr(code)
+        if ch == "U":
+            code = int(self._read_hex_digits(8, esc_line, esc_col), 16)
+            return chr(code)
+        raise QuantaSyntaxError(f"Unknown escape sequence \\{ch}", esc_line, esc_col)
+
     def _string(self, token_type: TokenType = TokenType.STRING) -> Token:
         """Scan a string or f-string literal."""
         start_line = self.line
@@ -235,13 +290,9 @@ class Lexer:
         value = ""
 
         while self._peek() != '"' and not self._is_at_end():
-            if self._peek() == "\\" and self._peek_next() == "{":
+            if self._peek() == "\\":
                 self._advance()
-                value += self._advance()
-                continue
-            if self._peek() == "\\" and self._peek_next() == "}":
-                self._advance()
-                value += self._advance()
+                value += self._decode_string_escape()
                 continue
             if self._peek() == "\n":
                 self.line += 1
@@ -299,6 +350,17 @@ class Lexer:
         """Skip a line comment"""
         while self._peek() != "\n" and not self._is_at_end():
             self._advance()
+
+    def _doc_comment(self) -> Token:
+        """Scan a documentation comment (/// ...) and emit a DOC_COMMENT token."""
+        start_line = self.line
+        start_col = self.column - 3
+        text = ""
+        while self._peek() != "\n" and not self._is_at_end():
+            text += self._advance()
+        if text.startswith(" "):
+            text = text[1:]
+        return Token(TokenType.DOC_COMMENT, text, start_line, start_col)
     
     def _advance(self) -> str:
         """Advance position and return character"""

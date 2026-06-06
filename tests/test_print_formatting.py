@@ -255,7 +255,7 @@ Print(f"{q[0]:bloch}")
     assert "θ" in out or "theta" in out.lower()
     assert "90°" in out
     assert "vector: (1.0000, 0.0000, 0.0000)" in out
-    assert "STATE" in out
+    assert "STATE" not in out
 
 
 def test_fstring_bloch_zero_state():

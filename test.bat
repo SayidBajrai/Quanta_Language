@@ -25,7 +25,10 @@ if errorlevel 1 (
 )
 
 echo.
-echo Running pytest (127 tests)...
+echo Running pytest...
+echo   - qint operator desugaring (QAdd/QSub/QMult/QDiv/QMod)
+echo   - frontend arithmetic simulation (QAdd/QSub/QMult)
+echo   - OpenQASM lowering
 echo.
 
 python -m pytest tests\ -v --tb=short

@@ -30,6 +30,7 @@ from ..ast.nodes import (
     AssignExpr,
     ParamSpec,
 )
+from ..sema.overload import func_param_signature, mangled_def_name
 from .qasm3 import QASM3Generator, GATE_MAP, QUANTUM_ARITHMETIC_OPS
 
 
@@ -38,10 +39,27 @@ class StructuredQASMGenerator(QASM3Generator):
 
     def __init__(self):
         super().__init__()
-        self.functions: Dict[str, FuncDecl] = {}
         self.emitted_arithmetic_gates: Set[str] = set()
         self.in_def_body = False
         self.local_registers: Set[str] = set()
+
+    def _func_def_name(self, func: FuncDecl) -> str:
+        return mangled_def_name(func.name, func_param_signature(func))
+
+    def _emit_user_func_call(self, expr: CallExpr) -> bool:
+        if expr.resolved_func is None:
+            return False
+        qname = self._func_def_name(expr.resolved_func)
+        args = ", ".join(self._expr_to_qasm(arg) for arg in expr.args)
+        self._emit(f"{qname} {args};")
+        return True
+
+    def _format_user_func_call(self, expr: CallExpr) -> Optional[str]:
+        if expr.resolved_func is None:
+            return None
+        qname = self._func_def_name(expr.resolved_func)
+        args = ", ".join(self._expr_to_qasm(arg) for arg in expr.args)
+        return f"{qname} {args}"
 
     def _emit(self, line: str) -> None:
         prefix = "    " * self.indent_level
@@ -79,7 +97,6 @@ class StructuredQASMGenerator(QASM3Generator):
         self.lines = []
         self.registers = {}
         self.gates = {}
-        self.functions = {}
         self.emitted_arithmetic_gates = set()
         self.in_def_body = False
         self.local_registers = set()
@@ -88,8 +105,6 @@ class StructuredQASMGenerator(QASM3Generator):
         for stmt in ast.statements:
             if isinstance(stmt, GateDecl):
                 self.gates[stmt.name] = stmt
-            elif isinstance(stmt, FuncDecl):
-                self.functions[stmt.name] = stmt
             elif isinstance(stmt, QuantumDecl):
                 self.registers[stmt.name] = (stmt.kind, stmt.size or 1)
 
@@ -116,7 +131,8 @@ class StructuredQASMGenerator(QASM3Generator):
             f"{self._param_to_qasm_type(pspec)} {pspec.name}" for pspec in node.param_specs
         )
         ret = self._return_type_to_qasm(node)
-        self._emit(f"def {node.name} {params}{ret} {{")
+        qname = self._func_def_name(node)
+        self._emit(f"def {qname} {params}{ret} {{")
         self.indent_level += 1
         self.in_def_body = True
         saved_locals = set(self.local_registers)
@@ -176,12 +192,9 @@ class StructuredQASMGenerator(QASM3Generator):
             self._emit(f"{self._format_assignment(expr)};")
             return
         if isinstance(expr, CallExpr) and isinstance(expr.callee, VarExpr):
-            name = expr.callee.name
-            if name in ("Print", "print"):
+            if expr.callee.name == "Print":
                 return
-            if name in self.functions:
-                args = ", ".join(self._expr_to_qasm(arg) for arg in expr.args)
-                self._emit(f"{name} {args};")
+            if self._emit_user_func_call(expr):
                 return
         super().visit_expr_stmt(node)
 
@@ -194,10 +207,9 @@ class StructuredQASMGenerator(QASM3Generator):
 
     def _format_assign_rhs(self, expr: Expr) -> str:
         if isinstance(expr, CallExpr) and isinstance(expr.callee, VarExpr):
-            name = expr.callee.name
-            if name in self.functions:
-                args = ", ".join(self._expr_to_qasm(arg) for arg in expr.args)
-                return f"{name} {args}"
+            call = self._format_user_func_call(expr)
+            if call is not None:
+                return call
             if name == "Measure" and len(expr.args) == 1:
                 return f"measure {self._expr_to_qasm(expr.args[0])}"
         return self._expr_to_qasm(expr)
@@ -230,10 +242,46 @@ class StructuredQASMGenerator(QASM3Generator):
         return self.registers.get(reg_name, (None, 1))[1]
 
     def _arithmetic_signature(self, op_name: str, args: List[Expr]) -> str:
+        if op_name == "Grover" and len(args) >= 2:
+            reg_size = str(self._register_size_for_arg(args[0]))
+            target = QASM3Generator._eval_to_int(self, args[1])
+            if target is not None:
+                return f"Grover_{reg_size}_{target}"
         sizes = [str(self._register_size_for_arg(arg)) for arg in args]
         return f"{op_name}_{'_'.join(sizes)}"
 
     def _emit_arithmetic_gate_def(self, op_name: str, args: List[Expr], gate_name: str) -> None:
+        if op_name == "Grover" and len(args) >= 2:
+            pname = "__p0"
+            reg_str = QASM3Generator._expr_to_qasm(self, args[0])
+            reg_name = reg_str.split("[")[0]
+            kind, size = self.registers.get(reg_name, ("qint", 1))
+            temp_registers = dict(self.registers)
+            temp_registers[pname] = (kind, size)
+            saved_registers = self.registers
+            saved_lines = self.lines
+            body_lines: List[str] = []
+            self.registers = temp_registers
+            self.lines = body_lines
+            try:
+                QASM3Generator._generate_grover_circuit(
+                    self, [VarExpr(pname), args[1]]
+                )
+            finally:
+                self.registers = saved_registers
+                self.lines = saved_lines
+
+            self._emit(f"gate {gate_name} {pname} {{")
+            self.indent_level += 1
+            for line in body_lines:
+                stripped = line.strip()
+                if stripped and not stripped.startswith("//"):
+                    self._emit(stripped)
+            self.indent_level -= 1
+            self._emit("}")
+            self._emit("")
+            return
+
         param_names: List[str] = []
         temp_registers: Dict[str, Tuple[str, int]] = dict(self.registers)
         param_exprs: List[Expr] = []
@@ -275,6 +323,10 @@ class StructuredQASMGenerator(QASM3Generator):
         if gate_name not in self.emitted_arithmetic_gates:
             self._emit_arithmetic_gate_def(op_name, args, gate_name)
             self.emitted_arithmetic_gates.add(gate_name)
+        if op_name == "Grover":
+            operands = QASM3Generator._expr_to_qasm(self, args[0])
+            self._emit(f"{gate_name} {operands};")
+            return
         operands = ", ".join(QASM3Generator._expr_to_qasm(self, arg) for arg in args)
         self._emit(f"{gate_name} {operands};")
 
@@ -308,11 +360,9 @@ class StructuredQASMGenerator(QASM3Generator):
     def visit_call_expr(self, node: CallExpr) -> None:
         if isinstance(node.callee, VarExpr):
             name = node.callee.name
-            if name in ("Print", "print"):
+            if name == "Print":
                 return
-            if name in self.functions:
-                args = ", ".join(self._expr_to_qasm(arg) for arg in node.args)
-                self._emit(f"{name} {args};")
+            if self._emit_user_func_call(node):
                 return
             if name in QUANTUM_ARITHMETIC_OPS:
                 self._handle_quantum_arithmetic(name, node.args)

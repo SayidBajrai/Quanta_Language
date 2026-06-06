@@ -13,6 +13,9 @@ from ..ast.nodes import (
 )
 from ..errors import QuantaSyntaxError
 from ..types.tensor import TensorType
+from ..docs.comment_parser import ParsedDocComment, parse_doc_comment
+
+_CLASSICAL_TYPES = frozenset({"int", "float", "bool", "str", "var", "list", "dict"})
 
 
 class Parser:
@@ -51,11 +54,13 @@ class Parser:
         # If we encounter a closing brace, return None to signal end of block
         if self._check(TokenType.RBRACE):
             return None
-        
+
+        doc = self._parse_leading_doc_comments()
+
         if self._match(TokenType.FUNC):
-            return self._parse_function()
+            return self._parse_function(doc=doc)
         elif self._match(TokenType.GATE):
-            return self._parse_gate()
+            return self._parse_gate(doc=doc)
         elif self._match(TokenType.CLASS):
             return self._parse_class()
         elif self._match(TokenType.VAR):
@@ -85,7 +90,21 @@ class Parser:
                 self._match(TokenType.SEMICOLON)
                 return ExprStmt(expr)
         return None
-    
+
+    def _parse_leading_doc_comments(self) -> Optional[ParsedDocComment]:
+        """Collect consecutive /// doc-comment lines immediately before a declaration."""
+        lines: List[str] = []
+        while True:
+            while self._match(TokenType.NEWLINE):
+                pass
+            if self._check(TokenType.DOC_COMMENT):
+                lines.append(self._advance().value)
+            else:
+                break
+        if not lines:
+            return None
+        return parse_doc_comment(lines)
+
     def _parse_quantum_kind_token(self) -> str:
         """Parse qbit/bit/qint/bint/qdec/qfloat keyword into kind string."""
         kind_token = self._advance()
@@ -119,16 +138,26 @@ class Parser:
             size = 1
         return kind, size, shape or [1]
 
-    def _parse_param_spec(self) -> ParamSpec:
+    def _parse_param_spec(self, default_kind: str = "qbit") -> ParamSpec:
         """Parse a function parameter, optionally typed."""
-        if self._check(TokenType.QBIT, TokenType.BIT, TokenType.QINT, TokenType.BINT):
+        if self._check(
+            TokenType.QBIT, TokenType.BIT, TokenType.QINT, TokenType.BINT,
+            TokenType.QDEC, TokenType.QFLOAT,
+        ):
             kind, size, shape = self._parse_quantum_type_prefix()
             name = self._consume(TokenType.IDENT, "Expected parameter name").value
             return ParamSpec(kind, name, size, shape)
+        if self._check(
+            TokenType.INT, TokenType.FLOAT, TokenType.BOOL, TokenType.STR,
+            TokenType.LIST, TokenType.DICT, TokenType.VAR,
+        ):
+            kind = self._advance().value
+            name = self._consume(TokenType.IDENT, "Expected parameter name").value
+            return ParamSpec(kind, name)
         name = self._consume(TokenType.IDENT, "Expected parameter name").value
-        return ParamSpec("qbit", name)
+        return ParamSpec(default_kind, name)
 
-    def _parse_function(self) -> FuncDecl:
+    def _parse_function(self, doc: Optional[ParsedDocComment] = None) -> FuncDecl:
         """Parse function declaration: func [type] name(params) { ... }"""
         return_type = None
         return_kind = None
@@ -145,11 +174,12 @@ class Parser:
         name = self._consume(TokenType.IDENT, "Expected function name").value
 
         self._consume(TokenType.LPAREN, "Expected '(' after function name")
+        default_param_kind = "var" if return_type in _CLASSICAL_TYPES else "qbit"
         params: List[str] = []
         param_specs: List[ParamSpec] = []
         if not self._check(TokenType.RPAREN):
             while True:
-                pspec = self._parse_param_spec()
+                pspec = self._parse_param_spec(default_kind=default_param_kind)
                 param_specs.append(pspec)
                 params.append(pspec.name)
                 if not self._match(TokenType.COMMA):
@@ -172,9 +202,10 @@ class Parser:
             param_specs=param_specs,
             return_kind=return_kind,
             return_size=return_size,
+            doc=doc,
         )
     
-    def _parse_gate(self) -> GateDecl:
+    def _parse_gate(self, doc: Optional[ParsedDocComment] = None) -> GateDecl:
         """Parse gate macro declaration"""
         name = self._consume(TokenType.IDENT, "Expected gate name").value
         
@@ -197,7 +228,7 @@ class Parser:
                 body.append(stmt)
         self._consume(TokenType.RBRACE, "Expected '}' after gate body")
         
-        return GateDecl(name, params, body)
+        return GateDecl(name, params, body, doc=doc)
     
     def _parse_class(self) -> ClassDecl:
         """Parse class declaration"""
@@ -206,8 +237,11 @@ class Parser:
         
         members = []
         while not self._check(TokenType.RBRACE) and not self._is_at_end():
+            while self._match(TokenType.NEWLINE):
+                pass
+            doc = self._parse_leading_doc_comments()
             if self._match(TokenType.FUNC):
-                members.append(self._parse_function())
+                members.append(self._parse_function(doc=doc))
             elif self._match(TokenType.VAR):
                 members.append(self._parse_var_decl())
             else:

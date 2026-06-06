@@ -48,7 +48,7 @@ result = run(source, shots=1024)
 print(result)
 
 # Frontend debug: capture Print() output (statevector simulator only)
-debug_source = "qbit q\nH(q)\nprint(q)"
+debug_source = "qbit q\nH(q)\nPrint(q)"
 terminal = get_prints(debug_source)
 print(terminal)  # e.g. "1/sqrt(2) * |0> + 1/sqrt(2) * |1>"
 ```
@@ -113,7 +113,9 @@ measure q[1] -> c[1];
 - **Tensor Types**: N-dimensional classical and quantum tensors (`int[n][m]`, `float[3][3]`, `qbit[2][2]`)
 - **Tensor Algebra**: `DotProduct`, `CrossProduct`, `ElementwiseProduct`, `TensorProduct`, `Shape`, `Reshape`; dot operator `a . b` (frontend / classical only)
 - **Structured Compilation**: `compile(source, keep_structure=True)` preserves `def`/`gate` and control flow
-- **Print Formatting**: f-string specifiers for symbolic states, probabilities, entropy, Bloch vectors, circuit trace
+- **Print Formatting**: f-string specifiers for symbolic states, probabilities, entropy, amplitudes, summary, Bloch vectors, circuit trace
+- **String escapes**: C-style `\n`, `\r`, `\t`, `\\`, `\"`, hex/Unicode escapes in string and f-string literals
+- **User documentation**: `///` doc comments on `func` and `gate` declarations for IDE hover
 - **Metrics**: `Fidelity()` builtin (frontend simulation only)
 - **Gate Set**: `H`, `X`, `CNot`, `CZ`, `Swap`, `RZ`, `Measure`, and more
 - **High-Level Gates**: `Bell`, `GHZ`, `WState`, `SwapGate`, `QFT`, `InverseQFT`
@@ -200,6 +202,38 @@ let theta = pi / 4
 |---|---|
 |`const`|Compile-time literal|
 |`let`|Immutable value, resolved once|
+
+### Strings
+
+String literals use double quotes. Common C-style escape sequences are supported:
+
+```quanta
+Print("line1\nline2\ttab");   // newline and tab
+Print("path: C:\\data");      // backslash
+Print("quote: \"hi\"");       // embedded quote
+Print("hex: \x41");           // byte escape → "A"
+Print("unicode: \u0042");     // 4-digit Unicode → "B"
+```
+
+|Escape|Meaning|
+|---|---|
+|`\n`|Newline|
+|`\r`|Carriage return|
+|`\t`|Tab|
+|`\\`|Backslash|
+|`\"`|Double quote|
+|`\'`|Single quote|
+|`\a`, `\b`, `\f`, `\v`, `\0`|Bell, backspace, form feed, vertical tab, null|
+|`\{`, `\}`|Literal `{` / `}` (useful in f-strings)|
+|`\xHH`|Byte (2 hex digits)|
+|`\uHHHH`|Unicode code point (4 hex digits)|
+|`\UHHHHHHHH`|Unicode code point (8 hex digits)|
+
+F-strings (`f"..."`) use the same escapes in literal text. Use `{{` and `}}` for literal braces in f-string output.
+
+```quanta
+Print(f"state:\n{q:symbolic}");
+```
 
 ### Arrays (Lists)
 
@@ -291,7 +325,7 @@ float y0 = DotProduct(W[0, :], x)       // row–vector dot product
 float[2][2] A = [[1, 2], [3, 4]]
 float[2][2] B = [[0, 5], [6, 7]]
 float[4][4] kron = TensorProduct(A, B)
-print(Shape(kron))                      // (4, 4)
+Print(Shape(kron))                      // (4, 4)
 ```
 
 Helpers:
@@ -307,7 +341,9 @@ Helpers:
 
 ### Functions (Classical)
 
-#### Void Function
+Functions support optional **return types** and **parameter types**. Omit either to leave it unspecified; use `var` for an inferred return type.
+
+#### Void Function (no return)
 
 ```quanta
 func apply_h(q) {
@@ -315,15 +351,25 @@ func apply_h(q) {
 }
 ```
 
-#### Typed Return
+Untyped parameters on quantum functions default to `qbit`.
+
+#### Return Types
+
+| Syntax | Meaning |
+|--------|---------|
+| `func name(...)` | No return value (quantum subroutine) |
+| `func var name(...)` | Return type inferred from the body |
+| `func <type> name(...)` | Must return `<type>` (`int`, `float`, `bool`, `str`, …) |
+
+**Typed return:**
 
 ```quanta
-func int add(a, b) {
+func float add(float a, float b) {
     return a + b
 }
 ```
 
-#### Inferred Return
+**Inferred return (`var`):**
 
 ```quanta
 func var mul(a, b) {
@@ -331,10 +377,132 @@ func var mul(a, b) {
 }
 ```
 
-📌 **Rule**
+#### Parameter Types
+
+| Syntax | Meaning |
+|--------|---------|
+| `a, b` | Unspecified (classical functions default to untyped/`var`) |
+| `float a, float b` | Explicit classical types |
+| `qbit a, qbit b` | Explicit quantum types (for mixed or quantum functions) |
+
+You can mix specified and unspecified parameters and return types:
+
+```quanta
+func int add(a, b) {          // typed return, unspecified params
+    return a + b
+}
+
+func var scale(float x, factor) {   // inferred return, one typed param
+    return x * factor
+}
+```
+
+📌 **Rules**
 
 - `func name(...)` → no return
-- `func <type> name(...)` → must return
+- `func var name(...)` → return type inferred; no return-type check at compile time
+- `func <type> name(...)` → must contain a `return` statement
+
+#### Function overloading
+
+Multiple functions may share the same name when their **parameter signatures** differ. The compiler picks the best match at each call site from argument types.
+
+Uniqueness is based on:
+
+1. **Parameter count** — `add(a, b)` vs `add(a, b, c)`
+2. **Parameter types** — `add(int, int)` vs `add(float, float)`
+3. **Parameter order** — `swap(int, float)` vs `swap(float, int)`
+
+Return type is **not** part of the overload key — two functions with the same parameter signature cannot coexist even if their return types differ.
+
+```quanta
+/// - add function
+/// - adds two integers together
+/// int a - first variable
+/// int b - second variable
+/// return: int - result of add
+func int add(int a, int b) {
+    return a + b;
+}
+
+/// - add function
+/// - adds two floats together
+/// float a - first variable
+/// float b - second variable
+/// return: float - result of add
+func float add(float a, float b) {
+    return a + b;
+}
+
+int x = add(1, 2)        // resolves to int add(int, int)
+float y = add(1.5, 2.5)  // resolves to float add(float, float)
+```
+
+Unspecified parameter types (`var`) match any argument type but lose to more specific overloads when both fit.
+
+Structured OpenQASM output (`compile(..., keep_structure=True)`) emits mangled `def` names internally (e.g. `add__int_int`) so each overload lowers to a distinct definition.
+
+#### Documentation comments (`///`)
+
+Place consecutive `///` lines immediately before a `func` or `gate` declaration. Each line is classified by a three-tier rule (top-down priority):
+
+| Priority | Condition | Syntax |
+|----------|-----------|--------|
+| 1 | Line starts with `return:` | `return: [Type] - [Description]` |
+| 2 | Type + identifier before `-` | `[Type] [Identifier] - [Description]` |
+| 3 | Everything else | Summary prose (optional `-` bullet) |
+
+Use concrete types in docs when the declaration specifies them; use `var` when types are left unspecified.
+
+**Specified param and return types:**
+
+```quanta
+/// - add function
+/// - adds two floats together
+/// float a - first variable
+/// float b - second variable
+/// return: float - result of add
+func float add(float a, float b) {
+    return a + b;
+}
+```
+
+**Unspecified param and return types:**
+
+```quanta
+/// - add function
+/// - adds two variables together
+/// var a - first variable
+/// var b - second variable
+/// return: var - result of add
+func var add(a, b) {
+    return a + b;
+}
+```
+
+Gates use the same format:
+
+```quanta
+/// - prepare Bell state on two qubits
+/// qbit a - control qubit
+/// qbit b - target qubit
+gate bell(a, b) {
+    H(a);
+    CX(a, b);
+}
+```
+
+Extract documentation from source via the Python API:
+
+```python
+from quanta import get_user_function_docs, get_function_docs
+
+doc = get_user_function_docs(source, "add")   # FunctionSummary or None
+hover = doc.format_hover()                    # IDE tooltip text
+
+# Built-in lookup with user-doc fallback when source is provided:
+doc = get_function_docs("add", source=source)
+```
 
 ### Quantum Integer Types (`qint` and `bint`)
 
@@ -1190,17 +1358,77 @@ Print(q)      // |ψ⟩ (symbolic)
 |Primitive|Normal|
 |`bit[n]`|Measurement results|
 |`qbit[n]`|Symbolic bra-ket|
+|`qint[n]`|Symbolic bra-ket (same as `qbit`)|
+|`bint[n]`|Integer value|
 
-📌 No amplitudes unless simulator supports it.
+📌 Requires the frontend statevector simulator. No amplitudes or diagnostics on hardware backends.
+
+📌 **Case-sensitive:** the builtin must be spelled `Print()` — lowercase `print()` is not valid Quanta syntax.
+
+##### F-string format specifiers
+
+Format specifiers go **inside f-strings**, not as `Print()` arguments:
+
+```quanta
+Print(f"{q:summary}")       // ✅ multi-line diagnostic report
+Print(q:summary)            // ❌ invalid syntax
+```
+
+|Specifier|Aliases|Output|
+|---|---|---|
+|*(default)*|`symbolic`, `sym`, `s`|Symbolic statevector (bra-ket notation)|
+|`probabilities`|`prob`, `p`|Measurement probabilities per basis state|
+|`density`|`rho`, `dm`|Density matrix|
+|`entropy`|`ent`|Von Neumann entropy (4 decimal places)|
+|`amplitudes`|`amp`, `amps`|Nonzero amplitudes with magnitudes|
+|`summary`|`sum`|Multi-line diagnostic report (see below)|
+|`bloch`||Bloch sphere (single qubit or reduced subsystem)|
+|`bloch_vector`|`blochvector`, `bv`|Bloch vector tuple only|
+|`circuit`|`circ`|Gate execution trace for the register|
+
+**`:summary` example** (Bell state):
+
+```quanta
+qbit[2] q
+H(q[0])
+CX(q[0], q[1])
+Print(f"{q:summary}")
+```
+
+```
+QUBIT INFO
+- size: 2
+- type: entangled
+- purity: pure
+- entropy: 1.0000
+
+ENTANGLEMENT
+- entangled_groups: ...
+
+STATE COMPLEXITY
+- basis_states: 2
+- dominant_states:
+  |00⟩ : 0.7071
+  |11⟩ : 0.7071
+
+PREVIEW
+1/√2 * |00⟩ + 1/√2 * |11⟩
+```
+
+Works on `qbit[n]` and `qint[n]` registers (and indexed elements like `q[0]`). Classical `bint[n]` ignores quantum specifiers and prints its integer value. Combine specifiers in one f-string:
+
+```quanta
+Print(f"sym={q:symbolic} | prob={q:prob} | ent={q:entropy}")
+```
 
 #### `get_prints(quanta_code)` – Frontend debug execution (Python API)
 
 **Frontend Debug Execution Only. Not compatible with hardware backend.**
 
-Parses Quanta source, runs it in a statevector simulator, and returns the string that would be printed by all `Print()` / `print()` calls.
+Parses Quanta source, runs it in a statevector simulator, and returns the string that would be printed by all `Print()` calls.
 
-- **Classical**: `print(c)` appends the value of `c` (e.g. `[0, 1]` for a bit register).
-- **Quantum**: `print(q)` appends a symbolic state summary (e.g. `1/sqrt(2) * |0> + 1/sqrt(2) * |1>`). No state collapse.
+- **Classical**: `Print(c)` appends the value of `c` (e.g. `[0, 1]` for a bit register).
+- **Quantum**: `Print(q)` appends a symbolic state summary (e.g. `1/sqrt(2) * |0> + 1/sqrt(2) * |1>`). No state collapse.
 - **Entangled subsystems**: If you print a register that is entangled with others, the full state is shown with a note: `Subsystem entangled. 1/sqrt(2) * |00> + 1/sqrt(2) * |11>`.
 
 ```python
@@ -1208,7 +1436,7 @@ from quanta import get_prints
 terminal = get_prints("""
 qbit q
 H(q)
-print(q)
+Print(q)
 """)
 # terminal == "1/sqrt(2) * |0> + 1/sqrt(2) * |1>"
 ```
@@ -1467,11 +1695,12 @@ black src
 ruff check src
 ```
 
-The `tests/` directory (127 tests) includes:
+The `tests/` directory (191 tests) includes:
 
 | Module | Coverage |
 |--------|----------|
-| `test_parser.py` | Parsing |
+| `test_parser.py` | Parsing, string escape sequences |
+| `test_doc_comments.py` | User `///` documentation comments |
 | `test_examples.py` | End-to-end compile |
 | `test_lowering.py` | QASM lowering, `Measure`, `qdec`/`qfloat`, high-level gates |
 | `test_lowering_structured.py` | `keep_structure=True` |

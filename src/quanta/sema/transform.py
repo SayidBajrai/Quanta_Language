@@ -50,6 +50,10 @@ _QINT_OP_TO_FUNC = {
     "%": "QMod",
 }
 
+_QINT_CALL_INITIALIZERS = frozenset(
+    {"QFTAdd", "QTreeAdd", "QExpEncMult", "QTreeMult"}
+)
+
 
 class ASTTransformer(Visitor):
     """Transforms AST to desugar operator overloading and other syntactic sugar"""
@@ -96,6 +100,14 @@ class ASTTransformer(Visitor):
             return stmt
 
         if isinstance(stmt, QuantumDecl):
+            if (
+                stmt.kind == "qint"
+                and stmt.value
+                and isinstance(stmt.value, CallExpr)
+                and isinstance(stmt.value.callee, VarExpr)
+                and stmt.value.callee.name in _QINT_CALL_INITIALIZERS
+            ):
+                return self._transform_qint_call_initializer(stmt, stmt.value)
             if stmt.value and isinstance(stmt.value, BinaryExpr):
                 if stmt.value.op in _QINT_OP_TO_FUNC and stmt.kind == "qint":
                     return self._transform_qint_quantum_decl(stmt)
@@ -398,6 +410,28 @@ class ASTTransformer(Visitor):
             return [stmt]
         size = self._resolve_size(None, stmt.type_hint, stmt.value)
         return self._desugar_qint_expr(stmt.value, stmt.name, size)
+
+    def _resolve_size_from_qint_args(self, args: List[Expr]) -> int:
+        for arg in args:
+            if isinstance(arg, VarExpr):
+                width = parse_qint_width(self.symbols.get(arg.name, ""))
+                if width is not None:
+                    return width
+        return 1
+
+    def _transform_qint_call_initializer(
+        self, stmt: QuantumDecl, call: CallExpr
+    ) -> List[Stmt]:
+        """Desugar qint c = Op(a, b) into decl + Op(a, b, c) for arithmetic calls."""
+        size = stmt.size or self._resolve_size_from_qint_args(call.args)
+        dest_decl = self._make_qint_decl(stmt.name, size)
+        self.symbols[stmt.name] = self._qint_symbol_type(size)
+        new_call = CallExpr(
+            call.callee,
+            list(call.args) + [VarExpr(stmt.name)],
+            modifiers=call.modifiers,
+        )
+        return [dest_decl, ExprStmt(new_call)]
 
     def _transform_qint_quantum_decl(self, stmt: QuantumDecl) -> List[Stmt]:
         if not isinstance(stmt.value, BinaryExpr):

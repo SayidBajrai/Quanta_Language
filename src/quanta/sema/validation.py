@@ -20,6 +20,7 @@ from .indexing import (
     eval_const_int,
     effective_arg_count,
 )
+from .overload import FuncOverloadTable, infer_expr_type, resolve_func_overload
 from .typecheck import tensor_type_from_decl, tensor_type_from_quantum, eval_literal_list
 
 
@@ -37,7 +38,7 @@ class SemanticAnalyzer:
     
     def __init__(self):
         self.symbols: Dict[str, Symbol] = {}
-        self.functions: Dict[str, FuncDecl] = {}
+        self.func_overloads = FuncOverloadTable()
         self.gates: Dict[str, GateDecl] = {}
         self.constants: Dict[str, ConstDecl] = {}
         self.tensor_shapes: Dict[str, tuple] = {}
@@ -60,7 +61,6 @@ class SemanticAnalyzer:
             "error",
             "warn",
             "Print",
-            "print",
         }
     
     def analyze(self, ast: Program, keep_structure: bool = False):
@@ -74,7 +74,7 @@ class SemanticAnalyzer:
                 if tensor_type.shape():
                     self.tensor_shapes[stmt.name] = tensor_type.shape()
             elif isinstance(stmt, FuncDecl):
-                self.functions[stmt.name] = stmt
+                self.func_overloads.register(stmt)
             elif isinstance(stmt, GateDecl):
                 self.gates[stmt.name] = stmt
             elif isinstance(stmt, ConstDecl):
@@ -222,7 +222,7 @@ class SemanticAnalyzer:
             self._validate_expression(expr.right)
         elif isinstance(expr, VarExpr):
             if (expr.name not in self.symbols and 
-                expr.name not in self.functions and 
+                not self.func_overloads.has(expr.name) and 
                 expr.name not in self.gates and
                 expr.name not in self.builtin_constants and
                 expr.name not in self.builtin_functions):
@@ -241,7 +241,7 @@ class SemanticAnalyzer:
             if (
                 isinstance(expr.value, CallExpr)
                 and isinstance(expr.value.callee, VarExpr)
-                and expr.value.callee.name in self.functions
+                and self.func_overloads.has(expr.value.callee.name)
                 and not self.keep_structure
             ):
                 raise QuantaSemanticError(
@@ -325,9 +325,11 @@ class SemanticAnalyzer:
                     )
                 for arg in expr.args:
                     self._validate_expression(arg)
-            elif name in self.functions:
-                # Function call - validate arguments match
-                func = self.functions[name]
+            elif self.func_overloads.has(name):
+                funcs = self.func_overloads.overloads(name)
+                arg_types = [infer_expr_type(arg, self.symbols) for arg in expr.args]
+                func = resolve_func_overload(name, funcs, arg_types)
+                expr.resolved_func = func
                 registers = self._register_sizes()
                 arg_count = sum(effective_arg_count(a, registers) for a in expr.args)
                 if arg_count != len(func.params):
@@ -367,6 +369,13 @@ class SemanticAnalyzer:
                 "Shape",
             ):
                 self._validate_tensor_algebra(name, expr)
+            elif name == "print":
+                raise QuantaSemanticError(
+                    "Use 'Print()' (capital P); lowercase 'print()' is not valid Quanta syntax"
+                )
+            elif name == "Print":
+                for arg in expr.args:
+                    self._validate_expression(arg)
             else:
                 # Assume it's a built-in gate or stdlib function - validate arguments
                 for arg in expr.args:

@@ -12,6 +12,18 @@ from ..ast.nodes import (
     Node
 )
 from ..ast.visitor import Visitor
+from ..runtime.quantum_arithmetic import (
+    emit_qadd_lines,
+    emit_qdiv_lines,
+    emit_qexpencmult_lines,
+    emit_qftadd_lines,
+    emit_grover_lines,
+    emit_qmod_lines,
+    emit_qmult_lines,
+    emit_qsub_lines,
+    emit_qtreeadd_lines,
+    emit_qtreemult_lines,
+)
 
 
 # Gate mapping: Quanta name -> QASM name
@@ -55,23 +67,92 @@ class QASM3Generator(Visitor):
         self.registers: Dict[str, tuple] = {}  # name -> (kind, size)
         self.gates: Dict[str, GateDecl] = {}  # Gate macros
         self.indent_level = 0
+        self.qadd_ancilla = "__qarith_anc"
+        self.qarith_temp = "__qarith_temp"
+        self.qarith_one = "__qarith_one"
+        self.qarith_vbe_helper = "__qarith_vbe_helper"
+        self.qarith_product = "__qarith_product"
+        self.register_init: Dict[str, int] = {}
+    
+    @staticmethod
+    def _collect_arithmetic_ops(ast: Program) -> Dict[str, bool]:
+        uses = {
+            "QAdd": False, "QSub": False, "QMult": False, "QFTAdd": False,
+            "QTreeAdd": False, "QExpEncMult": False, "QTreeMult": False,
+            "QDiv": False, "QMod": False,
+        }
+        for stmt in ast.statements:
+            stmts = [stmt]
+            if isinstance(stmt, FuncDecl):
+                stmts = list(stmt.body)
+            for s in stmts:
+                if isinstance(s, ExprStmt) and isinstance(s.expr, CallExpr):
+                    if not isinstance(s.expr.callee, VarExpr):
+                        continue
+                    name = s.expr.callee.name
+                    if name in uses:
+                        uses[name] = True
+        return uses
     
     def generate(self, ast: Program) -> str:
         """Generate QASM 3 code from AST"""
         self.lines = []
         self.registers = {}
         self.gates = {}
+        self.register_init = {}
         self.indent_level = 0
+        uses = self._collect_arithmetic_ops(ast)
         
-        # First pass: collect gate macros
+        # First pass: collect gate macros and qint register sizes
         for stmt in ast.statements:
             if isinstance(stmt, GateDecl):
                 self.gates[stmt.name] = stmt
+            if isinstance(stmt, QuantumDecl) and stmt.kind == "qint":
+                size = stmt.size or 1
+                self.registers[stmt.name] = ("qint", size)
+                if stmt.value and isinstance(stmt.value, LiteralExpr):
+                    try:
+                        self.register_init[stmt.name] = int(stmt.value.value)
+                    except (ValueError, TypeError):
+                        pass
+        
+        scratch_w = 0
+        for stmt in ast.statements:
+            stmts = [stmt]
+            if isinstance(stmt, FuncDecl):
+                stmts = list(stmt.body)
+            for s in stmts:
+                if isinstance(s, ExprStmt) and isinstance(s.expr, CallExpr):
+                    if not isinstance(s.expr.callee, VarExpr):
+                        continue
+                    if s.expr.callee.name in uses and uses[s.expr.callee.name]:
+                        for arg in s.expr.args:
+                            if isinstance(arg, VarExpr) and arg.name in self.registers:
+                                scratch_w = max(scratch_w, self.registers[arg.name][1])
+        uses_scratch = any(uses.values())
+        if uses_scratch and scratch_w == 0:
+            scratch_w = 1
         
         # Header
         self.lines.append("OPENQASM 3;")
         self.lines.append('include "stdgates.inc";')
         self.lines.append("")
+        if uses_scratch:
+            self.registers[self.qadd_ancilla] = ("qbit", 1)
+            self.lines.append(f"qubit {self.qadd_ancilla};")
+            if uses["QSub"] or uses["QMult"] or uses["QDiv"] or uses["QMod"]:
+                self.registers[self.qarith_temp] = ("qbit", scratch_w)
+                self.registers[self.qarith_one] = ("qbit", scratch_w)
+                self.lines.append(f"qubit[{scratch_w}] {self.qarith_temp};")
+                self.lines.append(f"qubit[{scratch_w}] {self.qarith_one};")
+                self.lines.append(f"x {self.qarith_one}[0];")
+            if uses["QTreeAdd"]:
+                self.registers[self.qarith_vbe_helper] = ("qbit", 2)
+                self.lines.append(f"qubit[2] {self.qarith_vbe_helper};")
+            if uses["QExpEncMult"] or uses["QTreeMult"]:
+                self.registers[self.qarith_product] = ("qbit", scratch_w * 2)
+                self.lines.append(f"qubit[{scratch_w * 2}] {self.qarith_product};")
+            self.lines.append("")
         
         # Second pass: generate gate definitions first
         for stmt in ast.statements:
@@ -232,7 +313,7 @@ class QASM3Generator(Visitor):
                 self._handle_quantum_arithmetic(name, node.args)
                 return
             
-            if name in ("print", "Print"):
+            if name == "Print":
                 return
             elif name == "Fidelity":
                 return
@@ -521,948 +602,167 @@ class QASM3Generator(Visitor):
                 return
             self._generate_compare_circuit(args)
         elif op_name == "Grover":
-            # Grover(a, target) - Grover iteration
             if len(args) != 2:
                 return
-            a = self._expr_to_qasm(args[0])
-            target = self._expr_to_qasm(args[1])
-            self.lines.append(f"// Grover({a}, {target}) - Grover iteration")
-            # TODO: Generate actual Grover operator circuit
+            self._generate_grover_circuit(args)
     
+    def _generate_grover_circuit(self, args: List[Expr]):
+        """Generate Grover oracle + diffusion for one iteration."""
+        if len(args) != 2:
+            return
+        reg_bits = self._register_bit_names(self._expr_to_qasm(args[0]))
+        target = self._eval_to_int(args[1])
+        n = len(reg_bits)
+        self.lines.append(f"// Grover iteration ({n} bits, target={target})")
+        if target is None:
+            self.lines.append("// Grover requires compile-time integer target")
+            return
+        emit_grover_lines(reg_bits, target, self.lines.append)
+
+    def _register_bit_names(self, reg_expr: str) -> List[str]:
+        """Expand a register QASM reference into per-bit names."""
+        if "[" in reg_expr:
+            return [reg_expr]
+        reg_name = reg_expr
+        size = self.registers.get(reg_name, (None, 1))[1] if reg_name in self.registers else 1
+        if size <= 1:
+            return [reg_name]
+        return [f"{reg_name}[{i}]" for i in range(size)]
+
     def _generate_qadd_circuit(self, args: List[Expr]):
-        """Generate ripple-carry adder circuit for QAdd operation"""
+        """Generate CDKM ripple-carry adder circuit for QAdd."""
         if len(args) < 2:
             return
-        
-        # Convert all arguments to QASM strings
         operand_strs = [self._expr_to_qasm(arg) for arg in args]
-        
-        # For variadic addition: QAdd(a, b, c, ..., dest)
-        # We chain additions: first add a+b into temp1, then add temp1+c into temp2, etc.
-        # Last argument is the destination
-        if len(args) == 2:
-            # Simple case: QAdd(a, b) - in-place addition: |a⟩|b⟩ → |a⟩|a+b mod 2^n⟩
-            a_reg = operand_strs[0]
-            b_reg = operand_strs[1]
-            self._generate_ripple_carry_adder(a_reg, b_reg, b_reg, in_place=True)
-        else:
-            # Variadic case: QAdd(a, b, c, ..., dest)
-            # Chain additions using temporary registers
-            inputs = operand_strs[:-1]
-            dest = operand_strs[-1]
-            
-            # For now, handle two inputs at a time
-            # Start with first two inputs
-            if len(inputs) >= 2:
-                # Use destination as temporary for first addition
-                temp = dest
-                self._generate_ripple_carry_adder(inputs[0], inputs[1], temp, in_place=False)
-                
-                # Add remaining inputs one by one
-                for i in range(2, len(inputs)):
-                    # Add temp + inputs[i] into temp (in-place)
-                    self._generate_ripple_carry_adder(temp, inputs[i], temp, in_place=True)
-            elif len(inputs) == 1:
-                # Only one input, just copy it (or handle as special case)
-                # For now, generate a simple addition with zero
-                self._generate_ripple_carry_adder(inputs[0], dest, dest, in_place=False)
+        register_bits = [self._register_bit_names(reg) for reg in operand_strs]
+        n = len(register_bits[0]) if register_bits else 0
+        self.lines.append(
+            f"// CDKM ripple-carry adder ({n} bits, {len(args)} operands)"
+        )
+        emit_qadd_lines(register_bits, self.qadd_ancilla, self.lines.append)
     
-    def _generate_ripple_carry_adder(self, a_reg: str, b_reg: str, result_reg: str, in_place: bool = False):
-        """
-        Generate a ripple-carry adder circuit with proper carry propagation.
-        
-        If in_place=True: |a⟩|b⟩ → |a⟩|a+b mod 2^n⟩ (b is overwritten)
-        If in_place=False: |a⟩|b⟩|0⟩ → |a⟩|b⟩|a+b mod 2^n⟩ (result in third register)
-        
-        This implements a reversible ripple-carry adder using:
-        - CNOT gates for XOR operations
-        - Toffoli (CCX) gates for AND operations and carry computation
-        - Proper carry propagation
-        """
-        # Extract register names and sizes
-        a_name = a_reg.split("[")[0] if "[" in a_reg else a_reg
-        b_name = b_reg.split("[")[0] if "[" in b_reg else b_reg
-        result_name = result_reg.split("[")[0] if "[" in result_reg else result_reg
-        
-        # Get register sizes
-        a_size = self.registers.get(a_name, (None, 1))[1] if a_name in self.registers else 1
-        b_size = self.registers.get(b_name, (None, 1))[1] if b_name in self.registers else 1
-        result_size = self.registers.get(result_name, (None, 1))[1] if result_name in self.registers else 1
-        
-        n = min(a_size, b_size, result_size)
-        
-        self.lines.append(f"// Ripple-carry adder: {a_reg} + {b_reg} -> {result_reg} (n={n} bits)")
-        
-        if n == 1:
-            # Single bit: just XOR
-            if in_place:
-                self.lines.append(f"cx {a_name}[0], {b_name}[0];  // sum[0] = a[0] XOR b[0]")
-            else:
-                self.lines.append(f"cx {a_name}[0], {result_name}[0];  // result[0] = a[0]")
-                self.lines.append(f"cx {b_name}[0], {result_name}[0];  // result[0] = a[0] XOR b[0]")
-        else:
-            if in_place:
-                # In-place addition: |a⟩|b⟩ → |a⟩|a+b mod 2^n⟩
-                # Bit 0: no carry
-                self.lines.append(f"cx {a_name}[0], {b_name}[0];  // sum[0] = a[0] XOR b[0]")
-                
-                # Bits 1 to n-1: compute with carry
-                for i in range(1, n):
-                    # Compute a[i] XOR b[i] into b[i]
-                    self.lines.append(f"cx {a_name}[{i}], {b_name}[{i}];  // b[{i}] = a[{i}] XOR b[{i}]")
-                    
-                    # Compute carry[i] = a[i-1] AND b[i-1] and XOR with sum
-                    # For first carry, this is exact: carry[1] = a[0] AND b[0]
-                    if i == 1:
-                        self.lines.append(f"ccx {a_name}[0], {b_name}[0], {b_name}[1];  // b[1] = (a[1] XOR b[1]) XOR (a[0] AND b[0])")
-                    else:
-                        # Simplified: carry[i] ≈ a[i-1] AND b[i-1]
-                        # Note: b[i-1] now contains sum[i-1], not original b[i-1]
-                        self.lines.append(f"ccx {a_name}[{i-1}], {b_name}[{i-1}], {b_name}[{i}];  // apply carry[{i}] effect (simplified)")
-            else:
-                # Out-of-place addition: |a⟩|b⟩|0⟩ → |a⟩|b⟩|a+b mod 2^n⟩
-                # Bit 0: no carry
-                self.lines.append(f"cx {a_name}[0], {result_name}[0];  // result[0] = a[0]")
-                self.lines.append(f"cx {b_name}[0], {result_name}[0];  // result[0] = a[0] XOR b[0]")
-                
-                # Bits 1 to n-1: compute carry and sum
-                for i in range(1, n):
-                    # Compute carry[i] = a[i-1] AND b[i-1]
-                    # Store in result[i] temporarily
-                    if i == 1:
-                        self.lines.append(f"ccx {a_name}[0], {b_name}[0], {result_name}[1];  // carry[1] = a[0] AND b[0]")
-                    else:
-                        # For i > 1, simplified carry (full version needs OR with previous carry)
-                        self.lines.append(f"ccx {a_name}[{i-1}], {b_name}[{i-1}], {result_name}[{i}];  // carry[{i}] = a[{i-1}] AND b[{i-1}]")
-                    
-                    # Compute sum[i] = a[i] XOR b[i] XOR carry[i]
-                    # result[i] currently contains carry[i]
-                    self.lines.append(f"cx {a_name}[{i}], {result_name}[{i}];  // result[{i}] = a[{i}] XOR carry[{i}]")
-                    self.lines.append(f"cx {b_name}[{i}], {result_name}[{i}];  // result[{i}] = a[{i}] XOR b[{i}] XOR carry[{i}]")
-                
-                self.lines.append(f"// Note: This implements a simplified ripple-carry adder")
-                self.lines.append(f"//       Full version would properly propagate all carries with OR terms")
-    
+    def _scratch_bit_names(self, reg_name: str, width: int) -> List[str]:
+        if width <= 1:
+            return [reg_name]
+        return [f"{reg_name}[{i}]" for i in range(width)]
+
     def _generate_qsub_circuit(self, args: List[Expr]):
-        """Generate ripple-borrow subtractor circuit for QSub operation"""
+        """Generate CDKM-based subtractor circuit for QSub."""
         if len(args) < 2:
             return
-        
-        # Convert all arguments to QASM strings
         operand_strs = [self._expr_to_qasm(arg) for arg in args]
-        
-        # For variadic subtraction: QSub(a, b, c, ..., dest)
-        # We chain subtractions: first subtract b from a into temp1, then subtract c from temp1, etc.
-        # Last argument is the destination
-        if len(args) == 2:
-            # Simple case: QSub(a, b) - in-place subtraction: |a⟩|b⟩ → |a⟩|a-b mod 2^n⟩
-            a_reg = operand_strs[0]
-            b_reg = operand_strs[1]
-            self._generate_ripple_borrow_subtractor(a_reg, b_reg, b_reg, in_place=True)
-        else:
-            # Variadic case: QSub(a, b, c, ..., dest)
-            # Chain subtractions using temporary registers
-            inputs = operand_strs[:-1]
-            dest = operand_strs[-1]
-            
-            # Start with first input
-            if len(inputs) >= 2:
-                # Use destination as temporary for first subtraction
-                temp = dest
-                self._generate_ripple_borrow_subtractor(inputs[0], inputs[1], temp, in_place=False)
-                
-                # Subtract remaining inputs one by one
-                for i in range(2, len(inputs)):
-                    # Subtract inputs[i] from temp (in-place)
-                    self._generate_ripple_borrow_subtractor(temp, inputs[i], temp, in_place=True)
-            elif len(inputs) == 1:
-                # Only one input, just copy it (or handle as special case)
-                self._generate_ripple_borrow_subtractor(inputs[0], dest, dest, in_place=False)
+        register_bits = [self._register_bit_names(reg) for reg in operand_strs]
+        n = len(register_bits[0]) if register_bits else 0
+        temp_bits = self._scratch_bit_names(self.qarith_temp, n)
+        one_bits = self._scratch_bit_names(self.qarith_one, n)
+        self.lines.append(f"// CDKM QSub ({n} bits, {len(args)} operands)")
+        emit_qsub_lines(register_bits, temp_bits, one_bits, self.qadd_ancilla, self.lines.append)
     
-    def _generate_ripple_borrow_subtractor(self, a_reg: str, b_reg: str, result_reg: str, in_place: bool = False):
-        """
-        Generate a ripple-borrow subtractor circuit.
-        
-        If in_place=True: |a⟩|b⟩ → |a⟩|a-b mod 2^n⟩ (b is overwritten)
-        If in_place=False: |a⟩|b⟩|0⟩ → |a⟩|b⟩|a-b mod 2^n⟩ (result in third register)
-        
-        This implements a reversible ripple-borrow subtractor using:
-        - CNOT gates for XOR operations
-        - Toffoli (CCX) gates for borrow computation
-        - Similar to addition but with borrow propagation instead of carry
-        """
-        # Extract register names and sizes
-        a_name = a_reg.split("[")[0] if "[" in a_reg else a_reg
-        b_name = b_reg.split("[")[0] if "[" in b_reg else b_reg
-        result_name = result_reg.split("[")[0] if "[" in result_reg else result_reg
-        
-        # Get register sizes
-        a_size = self.registers.get(a_name, (None, 1))[1] if a_name in self.registers else 1
-        b_size = self.registers.get(b_name, (None, 1))[1] if b_name in self.registers else 1
-        result_size = self.registers.get(result_name, (None, 1))[1] if result_name in self.registers else 1
-        
-        n = min(a_size, b_size, result_size)
-        
-        self.lines.append(f"// Ripple-borrow subtractor: {a_reg} - {b_reg} -> {result_reg} (n={n} bits)")
-        
-        if n == 1:
-            # Single bit: just XOR (difference)
-            if in_place:
-                self.lines.append(f"cx {a_name}[0], {b_name}[0];  // diff[0] = a[0] XOR b[0]")
-            else:
-                self.lines.append(f"cx {a_name}[0], {result_name}[0];  // result[0] = a[0]")
-                self.lines.append(f"cx {b_name}[0], {result_name}[0];  // result[0] = a[0] XOR b[0]")
-        else:
-            if in_place:
-                # In-place subtraction: |a⟩|b⟩ → |a⟩|a-b mod 2^n⟩
-                # Bit 0: no borrow
-                self.lines.append(f"cx {a_name}[0], {b_name}[0];  // diff[0] = a[0] XOR b[0]")
-                
-                # Bits 1 to n-1: compute with borrow
-                for i in range(1, n):
-                    # Compute a[i] XOR b[i] into b[i]
-                    self.lines.append(f"cx {a_name}[{i}], {b_name}[{i}];  // b[{i}] = a[{i}] XOR b[{i}]")
-                    
-                    # Compute borrow[i] and apply to difference
-                    # borrow[i] = NOT a[i-1] AND b[i-1] (simplified)
-                    if i == 1:
-                        # borrow[1] = NOT a[0] AND b[0]
-                        # Use X gate to invert a[0] for borrow computation
-                        self.lines.append(f"x {a_name}[0];  // Invert a[0] for borrow")
-                        self.lines.append(f"ccx {a_name}[0], {b_name}[0], {b_name}[1];  // b[1] = (a[1] XOR b[1]) XOR borrow[1]")
-                        self.lines.append(f"x {a_name}[0];  // Restore a[0]")
-                    else:
-                        # Simplified borrow propagation
-                        self.lines.append(f"x {a_name}[{i-1}];  // Invert a[{i-1}] for borrow")
-                        self.lines.append(f"ccx {a_name}[{i-1}], {b_name}[{i-1}], {b_name}[{i}];  // apply borrow[{i}] effect")
-                        self.lines.append(f"x {a_name}[{i-1}];  // Restore a[{i-1}]")
-            else:
-                # Out-of-place subtraction: |a⟩|b⟩|0⟩ → |a⟩|b⟩|a-b mod 2^n⟩
-                # Bit 0: no borrow
-                self.lines.append(f"cx {a_name}[0], {result_name}[0];  // result[0] = a[0]")
-                self.lines.append(f"cx {b_name}[0], {result_name}[0];  // result[0] = a[0] XOR b[0]")
-                
-                # Bits 1 to n-1: compute borrow and difference
-                for i in range(1, n):
-                    # Compute borrow[i] = NOT a[i-1] AND b[i-1]
-                    # Store in result[i] temporarily
-                    if i == 1:
-                        self.lines.append(f"x {a_name}[0];  // Invert a[0] for borrow")
-                        self.lines.append(f"ccx {a_name}[0], {b_name}[0], {result_name}[1];  // borrow[1] = NOT a[0] AND b[0]")
-                        self.lines.append(f"x {a_name}[0];  // Restore a[0]")
-                    else:
-                        # Simplified borrow propagation
-                        self.lines.append(f"x {a_name}[{i-1}];  // Invert a[{i-1}] for borrow")
-                        self.lines.append(f"ccx {a_name}[{i-1}], {b_name}[{i-1}], {result_name}[{i}];  // borrow[{i}] = NOT a[{i-1}] AND b[{i-1}]")
-                        self.lines.append(f"x {a_name}[{i-1}];  // Restore a[{i-1}]")
-                    
-                    # Compute diff[i] = a[i] XOR b[i] XOR borrow[i]
-                    # result[i] currently contains borrow[i]
-                    self.lines.append(f"cx {a_name}[{i}], {result_name}[{i}];  // result[{i}] = a[{i}] XOR borrow[{i}]")
-                    self.lines.append(f"cx {b_name}[{i}], {result_name}[{i}];  // result[{i}] = a[{i}] XOR b[{i}] XOR borrow[{i}]")
-                
-                self.lines.append(f"// Note: This implements a simplified ripple-borrow subtractor")
-                self.lines.append(f"//       Full version would properly propagate all borrows")
-    
+    def _reg_name(self, reg_expr: str) -> str:
+        return reg_expr.split("[")[0] if "[" in reg_expr else reg_expr
+
     def _generate_qdiv_circuit(self, args: List[Expr]):
-        """Generate quantum division circuit using repeated subtraction"""
+        """Generate QDiv via repeated subtraction."""
         if len(args) < 4:
             return
-        
-        # QDiv(dividend, divisor, quotient, remainder)
         operand_strs = [self._expr_to_qasm(arg) for arg in args]
-        dividend = operand_strs[0]
-        divisor = operand_strs[1]
-        quotient = operand_strs[2]
-        remainder = operand_strs[3]
-        
-        dividend_name = dividend.split("[")[0] if "[" in dividend else dividend
-        divisor_name = divisor.split("[")[0] if "[" in divisor else divisor
-        quotient_name = quotient.split("[")[0] if "[" in quotient else quotient
-        remainder_name = remainder.split("[")[0] if "[" in remainder else remainder
-        
-        # Get register sizes
-        dividend_size = self.registers.get(dividend_name, (None, 1))[1] if dividend_name in self.registers else 1
-        divisor_size = self.registers.get(divisor_name, (None, 1))[1] if divisor_name in self.registers else 1
-        
-        n = min(dividend_size, divisor_size)
-        
-        self.lines.append(f"// Quantum division: {dividend} / {divisor} -> {quotient}, remainder -> {remainder} (n={n} bits)")
-        self.lines.append(f"// Algorithm: Repeated subtraction until dividend < divisor")
-        self.lines.append(f"// Initialize quotient and remainder")
-        self.lines.append(f"// remainder = dividend (copy)")
-        
-        # Copy dividend to remainder
-        for i in range(n):
-            self.lines.append(f"cx {dividend_name}[{i}], {remainder_name}[{i}];  // remainder[{i}] = dividend[{i}]")
-        
-        # Initialize quotient to zero (already done by declaration)
-        self.lines.append(f"// Quotient initialized to |0⟩")
-        
-        # Repeated subtraction loop (simplified - full version would use controlled subtraction)
-        self.lines.append(f"// Repeated subtraction: while remainder >= divisor:")
-        self.lines.append(f"//   1. Subtract divisor from remainder")
-        self.lines.append(f"//   2. Increment quotient")
-        self.lines.append(f"//   3. Check if remainder >= divisor (using Compare)")
-        self.lines.append(f"// Note: Full implementation requires controlled subtraction and comparison")
-        self.lines.append(f"//       This is a simplified version showing the structure")
-        
-        # For a full implementation, we would:
-        # 1. Use Compare to check if remainder >= divisor
-        # 2. If yes, subtract divisor from remainder (controlled by comparison flag)
-        # 3. Increment quotient (controlled by comparison flag)
-        # 4. Repeat until remainder < divisor
-        
-        self.lines.append(f"// Full implementation would use:")
-        self.lines.append(f"//   - Compare(remainder, divisor, flag) to check remainder >= divisor")
-        self.lines.append(f"//   - Controlled QSub(remainder, divisor, remainder) with control = flag")
-        self.lines.append(f"//   - Controlled increment of quotient with control = flag")
-        self.lines.append(f"//   - Loop until flag = 0")
-    
-    def _generate_qmod_circuit(self, args: List[Expr]):
-        """Generate quantum modulus circuit"""
-        if len(args) < 3:
-            return
-        
-        # Convert all arguments to QASM strings
-        operand_strs = [self._expr_to_qasm(arg) for arg in args]
-        
-        # For variadic modulus: QMod(a, b, c, ..., dest)
-        # Computes: result = a mod b mod c mod ...
-        # Last argument is the destination
-        if len(args) == 3:
-            # Simple case: QMod(a, b, result) - result = a mod b
-            a_reg = operand_strs[0]
-            b_reg = operand_strs[1]
-            result_reg = operand_strs[2]
-            
-            a_name = a_reg.split("[")[0] if "[" in a_reg else a_reg
-            b_name = b_reg.split("[")[0] if "[" in b_reg else b_reg
-            result_name = result_reg.split("[")[0] if "[" in result_reg else result_reg
-            
-            a_size = self.registers.get(a_name, (None, 1))[1] if a_name in self.registers else 1
-            b_size = self.registers.get(b_name, (None, 1))[1] if b_name in self.registers else 1
-            result_size = self.registers.get(result_name, (None, 1))[1] if result_name in self.registers else 1
-            
-            n = min(a_size, b_size, result_size)
-            
-            self.lines.append(f"// Quantum modulus: {a_reg} mod {b_reg} -> {result_reg} (n={n} bits)")
-            self.lines.append(f"// Algorithm: Repeated subtraction until result < b")
-            
-            # Copy a to result
-            for i in range(n):
-                self.lines.append(f"cx {a_name}[{i}], {result_name}[{i}];  // result[{i}] = a[{i}]")
-            
-            # Repeated subtraction (simplified)
-            self.lines.append(f"// Repeated subtraction: while result >= b:")
-            self.lines.append(f"//   1. Subtract b from result")
-            self.lines.append(f"//   2. Check if result >= b (using Compare)")
-            self.lines.append(f"//   3. Repeat until result < b")
-            self.lines.append(f"// Note: Full implementation requires controlled subtraction and comparison")
-        else:
-            # Variadic case: QMod(a, b, c, ..., dest)
-            # Computes: result = a mod b mod c mod ...
-            inputs = operand_strs[:-1]
-            dest = operand_strs[-1]
-            
-            # Start with first modulus operation: a mod b
-            if len(inputs) >= 2:
-                # Compute a mod b into temp, then temp mod c, etc.
-                temp = dest
-                # First modulus: a mod b (need to create temp Expr)
-                # For now, just generate the circuit directly
-                a_reg = inputs[0]
-                b_reg = inputs[1]
-                result_reg = temp
-                
-                a_name = a_reg.split("[")[0] if "[" in a_reg else a_reg
-                b_name = b_reg.split("[")[0] if "[" in b_reg else b_reg
-                result_name = result_reg.split("[")[0] if "[" in result_reg else result_reg
-                
-                a_size = self.registers.get(a_name, (None, 1))[1] if a_name in self.registers else 1
-                b_size = self.registers.get(b_name, (None, 1))[1] if b_name in self.registers else 1
-                result_size = self.registers.get(result_name, (None, 1))[1] if result_name in self.registers else 1
-                
-                n = min(a_size, b_size, result_size)
-                
-                # Copy a to result
-                for i in range(n):
-                    self.lines.append(f"cx {a_name}[{i}], {result_name}[{i}];  // result[{i}] = a[{i}]")
-                
-                self.lines.append(f"// Repeated subtraction: while result >= b")
-                
-                # Apply remaining moduli
-                for i in range(2, len(inputs)):
-                    # Compute temp mod inputs[i] into temp
-                    # This would require recursive call, but for now just note it
-                    self.lines.append(f"// Apply modulus with {inputs[i]}")
-    
-    def _generate_qmult_circuit(self, args: List[Expr]):
-        """Generate quantum multiplication circuit using shift-and-add approach"""
-        if len(args) < 3:
-            return
-        
-        # Convert all arguments to QASM strings
-        operand_strs = [self._expr_to_qasm(arg) for arg in args]
-        
-        # QMult(a, b, c, ..., dest) - variadic multiplication
-        # For now, handle the common case: QMult(a, b, dest)
-        if len(args) == 3:
-            # Binary multiplication: QMult(a, b, dest)
-            a_reg = operand_strs[0]
-            b_reg = operand_strs[1]
-            dest_reg = operand_strs[2]
-            self._generate_shift_and_add_multiplier(a_reg, b_reg, dest_reg)
-        else:
-            # Variadic case: chain multiplications into destination accumulator
-            inputs = operand_strs[:-1]
-            dest = operand_strs[-1]
+        register_bits = [self._register_bit_names(reg) for reg in operand_strs]
+        n = len(register_bits[0]) if register_bits else 0
+        temp_bits = self._scratch_bit_names(self.qarith_temp, n)
+        one_bits = self._scratch_bit_names(self.qarith_one, n)
+        dividend_name = self._reg_name(operand_strs[0])
+        divisor_name = self._reg_name(operand_strs[1])
+        emit_qdiv_lines(
+            register_bits[0],
+            register_bits[1],
+            register_bits[2],
+            register_bits[3],
+            temp_bits,
+            one_bits,
+            self.qadd_ancilla,
+            self.lines.append,
+            dividend_value=self.register_init.get(dividend_name),
+            divisor_value=self.register_init.get(divisor_name),
+        )
 
-            if len(inputs) >= 2:
-                self._generate_shift_and_add_multiplier(inputs[0], inputs[1], dest)
-                for i in range(2, len(inputs)):
-                    self._generate_shift_and_add_multiplier(dest, inputs[i], dest)
-    
-    def _generate_shift_and_add_multiplier(self, a_reg: str, b_reg: str, result_reg: str):
-        """
-        Generate quantum multiplication circuit using shift-and-add approach.
-        
-        Algorithm:
-        - For each bit i of B (multiplier):
-          - If B[i] == 1, add (A shifted by i) to result using controlled adder
-          - This is: result += (A * 2^i) when B[i] == 1
-        
-        Circuit structure:
-        - Initialize result to |0⟩
-        - For i = 0 to n-1:
-          - Controlled addition: if B[i] == 1, add shifted A to result
-          - The shift is implicit in which qubits of result receive the addition
-        """
-        # Extract register names and sizes
-        a_name = a_reg.split("[")[0] if "[" in a_reg else a_reg
-        b_name = b_reg.split("[")[0] if "[" in b_reg else b_reg
-        result_name = result_reg.split("[")[0] if "[" in result_reg else result_reg
-        
-        # Get register sizes
-        a_size = self.registers.get(a_name, (None, 1))[1] if a_name in self.registers else 1
-        b_size = self.registers.get(b_name, (None, 1))[1] if b_name in self.registers else 1
-        result_size = self.registers.get(result_name, (None, 1))[1] if result_name in self.registers else 1
-        
-        n = min(a_size, b_size)  # Size of input registers
-        # Result should ideally be 2n for full precision, but we use what's available
-        
-        self.lines.append(f"// Quantum multiplier (shift-and-add): {a_reg} * {b_reg} -> {result_reg}")
-        self.lines.append(f"// Algorithm: For each bit i of B, if B[i]==1, add (A shifted by i) to result")
-        self.lines.append(f"// Result register size: {result_size} (ideally 2*{n}={2*n} for full precision)")
-        
-        # Initialize result to zero (should already be |0>)
-        self.lines.append(f"// Initialize result register to |0> (already done by declaration)")
-        
-        # For each bit of the multiplier (B), perform controlled addition
-        for i in range(n):
-            self.lines.append(f"// Bit {i} of multiplier B: controlled addition of (A shifted by {i})")
-            self.lines.append(f"// If B[{i}] == 1, add A shifted by {i} bits to result")
-            
-            # For each bit of A, add it to the appropriate position in result
-            # Position in result = i + j (where j is the bit position in A)
-            for j in range(min(a_size, result_size - i)):
-                result_bit = i + j
-                if result_bit < result_size:
-                    # Controlled addition: if B[i] == 1, add A[j] to result[result_bit]
-                    # This is: result[result_bit] += A[j] when B[i] == 1
-                    # We use a controlled CNOT (Toffoli with control B[i])
-                    self.lines.append(f"//   ccx {b_name}[{i}], {a_name}[{j}], {result_name}[{result_bit}];  // Controlled add: if B[{i}], add A[{j}] to result[{result_bit}]")
-            
-            # For a full implementation, we'd use controlled ripple-carry adders
-            # For each bit i of B:
-            #   - Create shifted version of A (starting at position i in result)
-            #   - Use controlled QAdd with B[i] as control
-            self.lines.append(f"//   Full implementation would use: controlled-QAdd(A shifted by {i}, result) with control = B[{i}]")
-            self.lines.append(f"//   This requires a controlled ripple-carry adder circuit")
-        
-        self.lines.append(f"// Full shift-and-add multiplier structure:")
-        self.lines.append(f"//   1. For each bit i = 0 to n-1 of multiplier B:")
-        self.lines.append(f"//      a. If B[i] == 1 (controlled operation):")
-        self.lines.append(f"//      b. Add (A shifted by i) to result using controlled ripple-carry adder")
-        self.lines.append(f"//   2. Each controlled addition is reversible (uses uncomputation)")
-        self.lines.append(f"//   3. Result accumulates: result = sum(B[i] * (A shifted by i)) for all i")
+    def _generate_qmod_circuit(self, args: List[Expr]):
+        """Generate QMod via repeated subtraction."""
+        if len(args) < 3:
+            return
+        operand_strs = [self._expr_to_qasm(arg) for arg in args]
+        register_bits = [self._register_bit_names(reg) for reg in operand_strs]
+        n = len(register_bits[0]) if register_bits else 0
+        temp_bits = self._scratch_bit_names(self.qarith_temp, n)
+        one_bits = self._scratch_bit_names(self.qarith_one, n)
+        emit_qmod_lines(
+            register_bits,
+            temp_bits,
+            one_bits,
+            self.qadd_ancilla,
+            self.lines.append,
+            init_values=self.register_init,
+        )
+
+    def _generate_qmult_circuit(self, args: List[Expr]):
+        """Generate shift-and-add multiplier circuit for QMult."""
+        if len(args) < 3:
+            return
+        operand_strs = [self._expr_to_qasm(arg) for arg in args]
+        register_bits = [self._register_bit_names(reg) for reg in operand_strs]
+        n = max(len(bits) for bits in register_bits) if register_bits else 0
+        temp_bits = self._scratch_bit_names(self.qarith_temp, n)
+        one_bits = self._scratch_bit_names(self.qarith_one, n)
+        self.lines.append(f"// QMult shift-and-add ({n} bits, {len(args)} operands)")
+        emit_qmult_lines(register_bits, temp_bits, one_bits, self.qadd_ancilla, self.lines.append)
         self.lines.append(f"// Requires: Controlled ripple-carry adders, ancilla qubits for carries")
     
     def _generate_qftadd_circuit(self, args: List[Expr]):
-        """Generate QFT-based adder circuit for QFTAdd operation"""
+        """Generate Draper QFT adder circuit for QFTAdd."""
         if len(args) < 2:
             return
-        
         operand_strs = [self._expr_to_qasm(arg) for arg in args]
-        
-        # For variadic addition: QFTAdd(a, b, c, ..., dest)
-        if len(args) == 2:
-            a_reg = operand_strs[0]
-            b_reg = operand_strs[1]
-            self._generate_qft_adder(a_reg, b_reg, b_reg, in_place=True)
-        else:
-            inputs = operand_strs[:-1]
-            dest = operand_strs[-1]
-            
-            if len(inputs) >= 2:
-                temp = dest
-                self._generate_qft_adder(inputs[0], inputs[1], temp, in_place=False)
-                
-                for i in range(2, len(inputs)):
-                    self._generate_qft_adder(temp, inputs[i], temp, in_place=True)
-            elif len(inputs) == 1:
-                self._generate_qft_adder(inputs[0], dest, dest, in_place=False)
-    
-    def _generate_qft_adder(self, a_reg: str, b_reg: str, result_reg: str, in_place: bool = False):
-        """
-        Generate QFT-based adder circuit (Draper adder).
-        
-        Algorithm:
-        1. Apply QFT to target register
-        2. Use controlled phase rotations to add the other operand
-        3. Apply inverse QFT to transform back to computational basis
-        """
-        a_name = a_reg.split("[")[0] if "[" in a_reg else a_reg
-        b_name = b_reg.split("[")[0] if "[" in b_reg else b_reg
-        result_name = result_reg.split("[")[0] if "[" in result_reg else result_reg
-        
-        a_size = self.registers.get(a_name, (None, 1))[1] if a_name in self.registers else 1
-        b_size = self.registers.get(b_name, (None, 1))[1] if b_name in self.registers else 1
-        result_size = self.registers.get(result_name, (None, 1))[1] if result_name in self.registers else 1
-        
-        n = min(a_size, b_size, result_size)
-        
-        self.lines.append(f"// QFT-based adder (Draper adder): {a_reg} + {b_reg} -> {result_reg} (n={n} bits)")
-        
-        if in_place:
-            # In-place: |a⟩|b⟩ → |a⟩|a+b mod 2^n⟩
-            target_name = b_name
-            target_reg = b_reg
-        else:
-            # Out-of-place: |a⟩|b⟩|0⟩ → |a⟩|b⟩|a+b mod 2^n⟩
-            target_name = result_name
-            target_reg = result_reg
-        
-        # Step 1: Apply QFT to target register
-        # QFT layer 0
-        if n > 0:
-            self.lines.append(f"h {target_name}[0];")
-            if n > 1:
-                self.lines.append(f"crz(pi/2) {target_name}[1], {target_name}[0];")
-            if n > 2:
-                self.lines.append(f"crz(pi/4) {target_name}[2], {target_name}[0];")
-                for k in range(3, n):
-                    phase = f"pi/{2**k}"
-                    self.lines.append(f"crz({phase}) {target_name}[{k}], {target_name}[0];")
-        
-        # QFT layer 1
-        if n > 1:
-            self.lines.append(f"h {target_name}[1];")
-            if n > 2:
-                self.lines.append(f"crz(pi/2) {target_name}[2], {target_name}[1];")
-                for k in range(3, n):
-                    phase = f"pi/{2**(k-1)}"
-                    self.lines.append(f"crz({phase}) {target_name}[{k}], {target_name}[1];")
-        
-        # QFT layers 2 to n-1
-        for layer in range(2, n):
-            self.lines.append(f"h {target_name}[{layer}];")
-            for k in range(layer + 1, n):
-                phase = f"pi/{2**(k-layer)}"
-                self.lines.append(f"crz({phase}) {target_name}[{k}], {target_name}[{layer}];")
-        
-        # Swap for correct order (reverse qubits)
-        for i in range(n // 2):
-            self.lines.append(f"swap {target_name}[{i}], {target_name}[{n-1-i}];")
-        
-        # Step 2: Controlled phase rotations to add operands
-        import math
-        for i in range(n):
-            for j in range(min(i + 1, n)):
-                if i - j >= 0:
-                    phase_val = math.pi / (2 ** (i - j))
-                    phase_str = f"pi/{2**(i-j)}" if (i - j) > 0 else "pi"
-                    
-                    # Add contribution from a_reg
-                    if j < a_size:
-                        self.lines.append(f"crz({phase_str}) {a_name}[{j}], {target_name}[{i}];")
-                    
-                    # Add contribution from b_reg (only if out-of-place)
-                    if not in_place and j < b_size:
-                        self.lines.append(f"crz({phase_str}) {b_name}[{j}], {target_name}[{i}];")
-        
-        # Step 3: Apply inverse QFT to target register
-        # Unswap
-        for i in range(n // 2):
-            self.lines.append(f"swap {target_name}[{i}], {target_name}[{n-1-i}];")
-        
-        # Inverse QFT layers (reverse order)
-        for layer in range(n - 1, 1, -1):
-            for k in range(n - 1, layer, -1):
-                phase = f"-pi/{2**(k-layer)}"
-                self.lines.append(f"crz({phase}) {target_name}[{k}], {target_name}[{layer}];")
-            self.lines.append(f"h {target_name}[{layer}];")
-        
-        # Inverse QFT layer 1
-        if n > 1:
-            for k in range(n - 1, 1, -1):
-                phase = f"-pi/{2**(k-1)}"
-                self.lines.append(f"crz({phase}) {target_name}[{k}], {target_name}[1];")
-            if n > 2:
-                self.lines.append(f"crz(-pi/2) {target_name}[2], {target_name}[1];")
-            self.lines.append(f"h {target_name}[1];")
-        
-        # Inverse QFT layer 0
-        if n > 0:
-            for k in range(n - 1, 0, -1):
-                phase = f"-pi/{2**k}"
-                self.lines.append(f"crz({phase}) {target_name}[{k}], {target_name}[0];")
-            if n > 2:
-                self.lines.append(f"crz(-pi/4) {target_name}[2], {target_name}[0];")
-            if n > 1:
-                self.lines.append(f"crz(-pi/2) {target_name}[1], {target_name}[0];")
-            self.lines.append(f"h {target_name}[0];")
-    
+        register_bits = [self._register_bit_names(reg) for reg in operand_strs]
+        n = len(register_bits[0]) if register_bits else 0
+        self.lines.append(
+            f"// Draper QFT adder ({n} bits, {len(args)} operands)"
+        )
+        emit_qftadd_lines(register_bits, self.lines.append)
+
     def _generate_qtreeadd_circuit(self, args: List[Expr]):
-        """Generate tree-based adder circuit for QTreeAdd operation"""
+        """Generate VBE tree adder circuit for QTreeAdd."""
         if len(args) < 2:
             return
-        
         operand_strs = [self._expr_to_qasm(arg) for arg in args]
-        
-        # For variadic addition: QTreeAdd(a, b, c, ..., dest)
-        if len(args) == 2:
-            a_reg = operand_strs[0]
-            b_reg = operand_strs[1]
-            self._generate_tree_adder(a_reg, b_reg, b_reg, in_place=True)
-        else:
-            inputs = operand_strs[:-1]
-            dest = operand_strs[-1]
-            
-            if len(inputs) >= 2:
-                temp = dest
-                self._generate_tree_adder(inputs[0], inputs[1], temp, in_place=False)
-                
-                for i in range(2, len(inputs)):
-                    self._generate_tree_adder(temp, inputs[i], temp, in_place=True)
-            elif len(inputs) == 1:
-                self._generate_tree_adder(inputs[0], dest, dest, in_place=False)
-    
-    def _generate_tree_adder(self, a_reg: str, b_reg: str, result_reg: str, in_place: bool = False):
-        """
-        Generate tree-based carry-save/parallel adder circuit.
-        
-        Algorithm:
-        - Uses balanced tree structure to parallelize carry computation
-        - Reduces multiple partial operands in a tree (Wallace-tree inspired)
-        - Parallel controlled gates handle carry propagation efficiently
-        """
-        a_name = a_reg.split("[")[0] if "[" in a_reg else a_reg
-        b_name = b_reg.split("[")[0] if "[" in b_reg else b_reg
-        result_name = result_reg.split("[")[0] if "[" in result_reg else result_reg
-        
-        a_size = self.registers.get(a_name, (None, 1))[1] if a_name in self.registers else 1
-        b_size = self.registers.get(b_name, (None, 1))[1] if b_name in self.registers else 1
-        result_size = self.registers.get(result_name, (None, 1))[1] if result_name in self.registers else 1
-        
-        n = min(a_size, b_size, result_size)
-        
-        self.lines.append(f"// Tree-based adder: {a_reg} + {b_reg} -> {result_reg} (n={n} bits)")
-        
-        # Generate ancilla register name for carries (simplified - in practice would need proper allocation)
-        carry_name = f"_carry_{result_name}"
-        
-        # Level 0: Compute partial sums and carries in parallel
-        for i in range(n):
-            # Compute carry[i+1] = a[i] AND b[i]
-            if i < n - 1:
-                # Use result register bits as temporary carry storage (simplified)
-                # In full implementation, would allocate proper ancilla qubits
-                carry_bit = f"{result_name}[{i+1}]" if i+1 < result_size else f"{result_name}[{i}]"
-                self.lines.append(f"ccx {a_name}[{i}], {b_name}[{i}], {carry_bit};  // carry[{i+1}] = a[{i}] AND b[{i}]")
-            
-            # Compute sum[i] = a[i] XOR b[i]
-            self.lines.append(f"cx {a_name}[{i}], {result_name}[{i}];  // result[{i}] = a[{i}]")
-            self.lines.append(f"cx {b_name}[{i}], {result_name}[{i}];  // result[{i}] = a[{i}] XOR b[{i}]")
-        
-        # Tree carry reduction (simplified for small n)
-        # For n=3: combine carries 1,2,3
-        if n >= 2:
-            # Level 1: Combine carries
-            if n >= 3:
-                # Combine carry[1] and carry[2] into temp
-                temp_carry = f"{result_name}[{min(2, result_size-1)}]"
-                self.lines.append(f"ccx {result_name}[1], {result_name}[2], {temp_carry};  // Combine carries 1 and 2")
-            
-            # Level 2: Combine with carry[3] if exists
-            if n >= 3:
-                final_carry = f"{result_name}[{min(2, result_size-1)}]"
-                if n >= 4:
-                    self.lines.append(f"ccx {final_carry}, {result_name}[3], {result_name}[{min(3, result_size-1)}];  // Combine with carry 3")
-        
-        # Final sum combination: add carries to sum bits
-        for i in range(1, n):
-            carry_bit = f"{result_name}[{i}]"
-            if i < result_size:
-                # Add carry to sum[i]
-                self.lines.append(f"cx {carry_bit}, {result_name}[{i}];  // Add carry[{i}] to sum[{i}]")
-        
-        # Note: This is a simplified implementation. Full tree adder would:
-        # 1. Use proper ancilla qubits for carry storage
-        # 2. Implement full tree reduction with proper carry propagation
-        # 3. Uncompute intermediate carries for reversibility
-    
+        register_bits = [self._register_bit_names(reg) for reg in operand_strs]
+        n = len(register_bits[0]) if register_bits else 0
+        helper_bits = self._scratch_bit_names(self.qarith_vbe_helper, 2)
+        self.lines.append(f"// VBE tree adder ({n} bits, {len(args)} operands)")
+        emit_qtreeadd_lines(register_bits, helper_bits, self.lines.append)
+
     def _generate_qexpencmult_circuit(self, args: List[Expr]):
-        """Generate exponent-encoded multiplication circuit for QExpEncMult operation"""
+        """Generate RGQFT exponent-encoded multiplier for QExpEncMult."""
         if len(args) < 3:
             return
-        
         operand_strs = [self._expr_to_qasm(arg) for arg in args]
-        
-        # QExpEncMult(a, b, c, ..., dest) - variadic multiplication
-        if len(args) == 3:
-            a_reg = operand_strs[0]
-            b_reg = operand_strs[1]
-            dest_reg = operand_strs[2]
-            self._generate_expenc_multiplier(a_reg, b_reg, dest_reg)
-        else:
-            inputs = operand_strs[:-1]
-            dest = operand_strs[-1]
-            
-            if len(inputs) >= 2:
-                temp = dest
-                self._generate_expenc_multiplier(inputs[0], inputs[1], temp)
-                
-                for i in range(2, len(inputs)):
-                    self.lines.append(f"// Variadic exponent-encoded multiplication: would multiply intermediate result with {inputs[i]}")
-    
-    def _generate_expenc_multiplier(self, a_reg: str, b_reg: str, result_reg: str):
-        """
-        Generate exponent-encoded multiplication circuit.
-        
-        Algorithm:
-        1. Encode operands as superposition states in compact form (logarithmic qubits)
-        2. Use fast adder (QFT-based) to sum those encodings
-        3. Extract product from sum via measurement and classical post-processing
-        """
-        a_name = a_reg.split("[")[0] if "[" in a_reg else a_reg
-        b_name = b_reg.split("[")[0] if "[" in b_reg else b_reg
-        result_name = result_reg.split("[")[0] if "[" in result_reg else result_reg
-        
-        a_size = self.registers.get(a_name, (None, 1))[1] if a_name in self.registers else 1
-        b_size = self.registers.get(b_name, (None, 1))[1] if b_name in self.registers else 1
-        result_size = self.registers.get(result_name, (None, 1))[1] if result_name in self.registers else 1
-        
-        n = min(a_size, b_size)
-        log_n = max(1, (n.bit_length() - 1))
-        
-        self.lines.append(f"// Exponent-encoded multiplier: {a_reg} * {b_reg} -> {result_reg}")
-        
-        # Step 1: Encode m3 into phase (simplified - encode each bit with rotation)
-        for i in range(min(n, a_size)):
-            if i == 0:
-                self.lines.append(f"rz(pi/2 * {i}) {a_name}[{i}];  // Encode bit {i} of {a_name}")
-            else:
-                self.lines.append(f"crz(pi/2 * {i}) {a_name}[0], {a_name}[{i}];  // Encode bit {i} of {a_name}")
-        
-        # Step 2: Encode m4 into phase
-        for i in range(min(n, b_size)):
-            if i == 0:
-                self.lines.append(f"rz(pi/2 * {i}) {b_name}[{i}];  // Encode bit {i} of {b_name}")
-            else:
-                self.lines.append(f"crz(pi/2 * {i}) {b_name}[0], {b_name}[{i}];  // Encode bit {i} of {b_name}")
-        
-        # Step 3: QFT on result register
-        if result_size > 0:
-            # QFT layer 0
-            self.lines.append(f"h {result_name}[0];")
-            if result_size > 1:
-                self.lines.append(f"crz(pi/2) {result_name}[1], {result_name}[0];")
-            if result_size > 2:
-                self.lines.append(f"crz(pi/4) {result_name}[2], {result_name}[0];")
-                for k in range(3, result_size):
-                    phase = f"pi/{2**k}"
-                    self.lines.append(f"crz({phase}) {result_name}[{k}], {result_name}[0];")
-            
-            # QFT layer 1
-            if result_size > 1:
-                self.lines.append(f"h {result_name}[1];")
-                if result_size > 2:
-                    self.lines.append(f"crz(pi/2) {result_name}[2], {result_name}[1];")
-                    for k in range(3, result_size):
-                        phase = f"pi/{2**(k-1)}"
-                        self.lines.append(f"crz({phase}) {result_name}[{k}], {result_name}[1];")
-            
-            # QFT layers 2 to result_size-1
-            for layer in range(2, result_size):
-                self.lines.append(f"h {result_name}[{layer}];")
-                for k in range(layer + 1, result_size):
-                    phase = f"pi/{2**(k-layer)}"
-                    self.lines.append(f"crz({phase}) {result_name}[{k}], {result_name}[{layer}];")
-            
-            # Swap for correct order
-            for i in range(result_size // 2):
-                self.lines.append(f"swap {result_name}[{i}], {result_name}[{result_size-1-i}];")
-        
-        # Step 4: Add phases (multiplication in exponent domain)
-        # Add a_reg encoding
-        for i in range(min(n, a_size)):
-            for j in range(min(result_size, n + 1)):
-                if j == 0:
-                    phase = "pi"
-                else:
-                    phase = f"pi/{2**j}"
-                self.lines.append(f"crz({phase}) {a_name}[{i}], {result_name}[{j}];  // Add {a_name}[{i}] encoding")
-        
-        # Add b_reg encoding
-        for i in range(min(n, b_size)):
-            for j in range(min(result_size, n + 1)):
-                if j == 0:
-                    phase = "pi"
-                else:
-                    phase = f"pi/{2**j}"
-                self.lines.append(f"crz({phase}) {b_name}[{i}], {result_name}[{j}];  // Add {b_name}[{i}] encoding")
-        
-        # Step 5: Inverse QFT
-        if result_size > 0:
-            # Unswap
-            for i in range(result_size // 2):
-                self.lines.append(f"swap {result_name}[{i}], {result_name}[{result_size-1-i}];")
-            
-            # Inverse QFT layers (reverse order)
-            for layer in range(result_size - 1, 1, -1):
-                for k in range(result_size - 1, layer, -1):
-                    phase = f"-pi/{2**(k-layer)}"
-                    self.lines.append(f"crz({phase}) {result_name}[{k}], {result_name}[{layer}];")
-                self.lines.append(f"h {result_name}[{layer}];")
-            
-            # Inverse QFT layer 1
-            if result_size > 1:
-                for k in range(result_size - 1, 1, -1):
-                    phase = f"-pi/{2**(k-1)}"
-                    self.lines.append(f"crz({phase}) {result_name}[{k}], {result_name}[1];")
-                if result_size > 2:
-                    self.lines.append(f"crz(-pi/2) {result_name}[2], {result_name}[1];")
-                self.lines.append(f"h {result_name}[1];")
-            
-            # Inverse QFT layer 0
-            for k in range(result_size - 1, 0, -1):
-                phase = f"-pi/{2**k}"
-                self.lines.append(f"crz({phase}) {result_name}[{k}], {result_name}[0];")
-            if result_size > 2:
-                self.lines.append(f"crz(-pi/4) {result_name}[2], {result_name}[0];")
-            if result_size > 1:
-                self.lines.append(f"crz(-pi/2) {result_name}[1], {result_name}[0];")
-            self.lines.append(f"h {result_name}[0];")
-        
-        # Step 6: Decode (result is now in computational basis)
-        # Note: Full implementation would include measurement and classical post-processing
-        self.lines.append(f"// Decode: result is now in computational basis (measurement may be required)")
-    
+        register_bits = [self._register_bit_names(reg) for reg in operand_strs]
+        n = len(register_bits[0]) if register_bits else 0
+        product_bits = self._scratch_bit_names(self.qarith_product, n * 2)
+        self.lines.append(f"// RGQFT exponent-encoded multiplier ({n} bits, {len(args)} operands)")
+        emit_qexpencmult_lines(register_bits, product_bits, self.lines.append)
+
     def _generate_qtreemult_circuit(self, args: List[Expr]):
-        """Generate tree-based multiplication circuit for QTreeMult operation"""
+        """Generate HRS tree multiplier for QTreeMult."""
         if len(args) < 3:
             return
-        
         operand_strs = [self._expr_to_qasm(arg) for arg in args]
-        
-        # QTreeMult(a, b, c, ..., dest) - variadic multiplication
-        if len(args) == 3:
-            a_reg = operand_strs[0]
-            b_reg = operand_strs[1]
-            dest_reg = operand_strs[2]
-            self._generate_tree_multiplier(a_reg, b_reg, dest_reg)
-        else:
-            inputs = operand_strs[:-1]
-            dest = operand_strs[-1]
-            
-            if len(inputs) >= 2:
-                temp = dest
-                self._generate_tree_multiplier(inputs[0], inputs[1], temp)
-                
-                for i in range(2, len(inputs)):
-                    self.lines.append(f"// Variadic tree multiplication: would multiply intermediate result with {inputs[i]}")
-    
-    def _generate_tree_multiplier(self, a_reg: str, b_reg: str, result_reg: str):
-        """
-        Generate tree-based multiplication circuit (Wallace/Dadda-style).
-        
-        Algorithm:
-        - Inspired by classical multipliers like Wallace tree
-        - Reduces partial products more efficiently using quantum reversible gates
-        - Uses tree of controlled adders to combine partial products efficiently
-        """
-        a_name = a_reg.split("[")[0] if "[" in a_reg else a_reg
-        b_name = b_reg.split("[")[0] if "[" in b_reg else b_reg
-        result_name = result_reg.split("[")[0] if "[" in result_reg else result_reg
-        
-        a_size = self.registers.get(a_name, (None, 1))[1] if a_name in self.registers else 1
-        b_size = self.registers.get(b_name, (None, 1))[1] if b_name in self.registers else 1
-        result_size = self.registers.get(result_name, (None, 1))[1] if result_name in self.registers else 1
-        
-        n = min(a_size, b_size)
-        
-        self.lines.append(f"// Tree-based multiplier (Wallace/Dadda-style): {a_reg} * {b_reg} -> {result_reg}")
-        
-        # Step 1: Generate partial products in parallel
-        # For 2x2 bit multiplier (simplified example)
-        if n == 2:
-            # n2[0] * n1[0] -> result[0]
-            self.lines.append(f"ccx {b_name}[0], {a_name}[0], {result_name}[0];  // pp[0] = B[0] * A[0]")
-            
-            # n2[0] * n1[1] -> result[1]
-            self.lines.append(f"ccx {b_name}[0], {a_name}[1], {result_name}[1];  // pp[1] = B[0] * A[1]")
-            
-            # n2[1] * n1[0] -> result[1] (accumulate)
-            if result_size >= 2:
-                self.lines.append(f"ccx {b_name}[1], {a_name}[0], {result_name}[2];  // temp = B[1] * A[0]")
-                self.lines.append(f"cx {result_name}[1], {result_name}[2];  // result[2] = pp[1] XOR temp")
-                self.lines.append(f"ccx {b_name}[1], {a_name}[0], {result_name}[2];  // Restore temp")
-            
-            # n2[1] * n1[1] -> result[2] and result[3]
-            if result_size >= 3:
-                self.lines.append(f"ccx {b_name}[1], {a_name}[1], {result_name}[3];  // pp[3] = B[1] * A[1]")
-                if result_size >= 2:
-                    self.lines.append(f"cx {result_name}[2], {result_name}[3];  // result[3] = result[2] XOR pp[3]")
-                    self.lines.append(f"ccx {b_name}[1], {a_name}[1], {result_name}[3];  // Restore")
-            
-            # Tree reduction (simplified for 2x2)
-            # First level: Add result[0] and result[1] into result[0:1]
-            if result_size >= 1:
-                # Half adder for bit 0 (already in result[0])
-                pass
-            
-            if result_size >= 2:
-                # Half adder for bit 1 (with carry from result[0]+result[1])
-                if result_size >= 3:
-                    self.lines.append(f"ccx {result_name}[0], {result_name}[1], {result_name}[2];  // carry from bit 0")
-                    self.lines.append(f"cx {result_name}[0], {result_name}[1];  // sum bit 1")
-                    self.lines.append(f"cx {result_name}[1], {result_name}[1];  // sum bit 1 (XOR)")
-                
-                # Second level: Add result[1:2] and result[2] with carry
-                if result_size >= 3:
-                    self.lines.append(f"ccx {result_name}[1], {result_name}[2], {result_name}[3];  // Full adder carry")
-                    if result_size >= 2:
-                        self.lines.append(f"ccx {result_name}[1], {result_name}[2], {result_name}[3];  // Full adder sum")
-                        self.lines.append(f"cx {result_name}[1], {result_name}[2];  // sum bit 2")
-                        self.lines.append(f"cx {result_name}[2], {result_name}[1];  // sum bit 1")
-        else:
-            # General n-bit case: generate partial products
-            for i in range(n):
-                for j in range(n):
-                    result_bit = i + j
-                    if result_bit < result_size:
-                        self.lines.append(f"ccx {b_name}[{i}], {a_name}[{j}], {result_name}[{result_bit}];  // pp[{i}][{j}] = B[{i}] * A[{j}]")
-            
-            # Tree reduction would go here (simplified)
-            self.lines.append(f"// Tree reduction: combine partial products using carry-save adders")
-        
-        # Note: This is a simplified implementation. Full tree multiplier would:
-        # 1. Properly allocate ancilla qubits for partial products
-        # 2. Implement full Wallace/Dadda tree reduction
-        # 3. Use proper carry-save adders for tree levels
-        # 4. Handle uncomputation for reversibility
-    
+        register_bits = [self._register_bit_names(reg) for reg in operand_strs]
+        n = len(register_bits[0]) if register_bits else 0
+        product_bits = self._scratch_bit_names(self.qarith_product, n * 2)
+        self.lines.append(f"// HRS tree multiplier ({n} bits, {len(args)} operands)")
+        emit_qtreemult_lines(
+            register_bits, product_bits, self.qadd_ancilla, self.lines.append
+        )
+
     def _generate_compare_circuit(self, args: List[Expr]):
         """Generate quantum comparison circuit for Compare operation"""
         if len(args) != 3:

@@ -48,7 +48,8 @@ reset(input)
 H(input)
 """
   qasm = compile_structured(source)
-  assert "def segment qubit[2] anc, qubit psi -> bit[2]" in qasm
+  assert "def segment__qbit2_qbit" in qasm
+  assert "qubit[2] anc, qubit psi -> bit[2]" in qasm
   assert "bit[2] b;" in qasm
   assert "reset anc;" in qasm or "reset(anc)" in source
   assert "measure anc -> b;" in qasm
@@ -74,7 +75,7 @@ while (int(flags) != 0) {
 """
   qasm = compile_structured(source)
   assert "while (" in qasm and "int(flags) != 0" in qasm
-  assert "flags = step q;" in qasm
+  assert "flags = step__qbit q;" in qasm
 
 
 def test_while_requires_structured_mode():
@@ -156,8 +157,8 @@ QAdd(a, b, c)
         ),
         (
             "Grover",
-            "qint[2] a\nqint[2] t\nGrover(a, t)",
-            "__Grover_2_2",
+            "qint[2] a\nGrover(a, 3)",
+            "__Grover_2_3",
         ),
     ],
 )
@@ -183,9 +184,9 @@ apply(q)
 """
     qasm = compile_structured(source)
     assert "gate Prep a {" in qasm
-    assert "def apply qubit q {" in qasm
+    assert "def apply__qbit qubit q {" in qasm
     assert "    Prep q;" in qasm
-    assert "apply q;" in qasm
+    assert "apply__qbit q;" in qasm
 
 
 def test_structured_user_func_calls_user_gate_in_main():
@@ -204,9 +205,9 @@ entangle(q[0], q[1])
 """
     qasm = compile_structured(source)
     assert "gate Bell a, b {" in qasm
-    assert "def entangle qubit a, qubit b {" in qasm
+    assert "def entangle__qbit_qbit qubit a, qubit b {" in qasm
     assert "    Bell a, b;" in qasm
-    assert "entangle q[0], q[1];" in qasm
+    assert "entangle__qbit_qbit q[0], q[1];" in qasm
 
 
 def test_api_compile_keep_structure_flag():

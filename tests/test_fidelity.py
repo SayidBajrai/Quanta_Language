@@ -34,7 +34,7 @@ X(q2)
 
 float fidelity_q1_q2 = Fidelity(q1, q2)
 
-print(fidelity_q1_q2)
+Print(fidelity_q1_q2)
 """
     out = get_prints(source)
     assert out == "0.5"
@@ -44,7 +44,7 @@ def test_fidelity_identical_zero_states():
     source = """
 qbit q1
 qbit q2
-print(Fidelity(q1, q2))
+Print(Fidelity(q1, q2))
 """
     assert get_prints(source) == "1.0"
 
@@ -55,7 +55,7 @@ qbit q1
 qbit q2
 H(q1)
 H(q2)
-print(Fidelity(q1, q2))
+Print(Fidelity(q1, q2))
 """
     assert get_prints(source) == "1.0"
 
@@ -65,7 +65,7 @@ def test_fidelity_orthogonal_states():
 qbit q1
 qbit q2
 X(q2)
-print(Fidelity(q1, q2))
+Print(Fidelity(q1, q2))
 """
     assert get_prints(source) == "0.0"
 
@@ -75,7 +75,7 @@ def test_fidelity_indexed_qubits():
 qbit[2] q
 H(q[0])
 X(q[1])
-print(Fidelity(q[0], q[1]))
+Print(Fidelity(q[0], q[1]))
 """
     assert get_prints(source) == "0.5"
 
@@ -86,7 +86,7 @@ qbit[2] a
 qbit[2] b
 H(a[0])
 H(b[0])
-print(Fidelity(a, b))
+Print(Fidelity(a, b))
 """
     out = get_prints(source)
     assert float(out) == pytest.approx(1.0, abs=1e-6)
@@ -132,6 +132,6 @@ qbit q1
 qbit q2
 H(q1)
 X(q2)
-print(Fidelity(q1, q2))
+Print(Fidelity(q1, q2))
 """
     assert get_prints(source) == get_prints(source)

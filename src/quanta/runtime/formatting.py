@@ -156,6 +156,7 @@ def statevector_to_symbolic(statevector: "Statevector", num_qubits_show: Optiona
     data = sv.data
     term_data: List[Tuple[str, str]] = []
     shared_coeff: Optional[str] = None
+    uniform_coeff = True
 
     for n in range(dim):
         amp = data[n]
@@ -165,14 +166,17 @@ def statevector_to_symbolic(statevector: "Statevector", num_qubits_show: Optiona
         r = _rationalize_amplitude(amp)
         if r is None:
             term_data.append((f"({amp.real:.4g}{amp.imag:+.4g}i)", ket))
+            uniform_coeff = False
             shared_coeff = None
             continue
         mag, sqrt_denom, phase_str = r
         coeff = _coeff_to_string(mag, sqrt_denom, phase_str)
-        if shared_coeff is None and coeff:
-            shared_coeff = coeff
-        elif shared_coeff is not None and coeff != shared_coeff:
-            shared_coeff = None
+        if uniform_coeff:
+            if shared_coeff is None and coeff:
+                shared_coeff = coeff
+            elif shared_coeff is not None and coeff != shared_coeff:
+                uniform_coeff = False
+                shared_coeff = None
         term_data.append((coeff, ket))
 
     if not term_data:
@@ -181,7 +185,7 @@ def statevector_to_symbolic(statevector: "Statevector", num_qubits_show: Optiona
         coeff, ket = term_data[0]
         return f"{coeff}{ket}" if coeff else ket
 
-    if shared_coeff:
+    if uniform_coeff and shared_coeff:
         inner = " + ".join(ket for _, ket in term_data)
         return f"{shared_coeff} ({inner})"
 
@@ -653,11 +657,6 @@ class QuantumFormatter:
             f"- φ (phi): {phi:.0f}°",
             f"- vector: {_format_bloch_vector_tuple(x, y, z)}",
         ]
-        if state.purity > PURITY_PURE_THRESHOLD:
-            reduced, n_show = _get_reduced_statevector(state.sv, state.indices)
-            symbolic = statevector_to_symbolic(reduced, n_show)
-            if symbolic not in ("|0⟩", "|1⟩"):
-                lines.extend(["", "STATE", symbolic])
         return "\n".join(lines)
 
     @staticmethod
