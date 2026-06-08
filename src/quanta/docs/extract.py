@@ -6,9 +6,8 @@ from typing import Dict, List, Optional
 
 from ..ast.nodes import ClassDecl, FuncDecl, GateDecl, ParamSpec, Program
 from ..stdlib.builtins import FunctionParam, FunctionSummary
+from ..types.kinds import CLASSICAL_RETURN_TYPES, CLASSICAL_TYPES, is_wildcard_type
 from .comment_parser import ParsedDocComment
-
-_CLASSICAL_RETURN_TYPES = frozenset({"int", "float", "bool", "str", "var", "list", "dict"})
 
 
 def _format_param_spec(ps: ParamSpec) -> str:
@@ -19,20 +18,22 @@ def _format_param_spec(ps: ParamSpec) -> str:
 
 
 def _format_classical_param(ps: ParamSpec) -> str:
-    if ps.kind in _CLASSICAL_RETURN_TYPES and ps.kind != "var":
+    if ps.kind in CLASSICAL_TYPES:
         return f"{ps.kind} {ps.name}"
+    if is_wildcard_type(ps.kind):
+        return ps.name
     return ps.name
 
 
 def build_func_signature(func: FuncDecl) -> str:
     """Build a display signature from a FuncDecl."""
-    if func.return_type in _CLASSICAL_RETURN_TYPES:
+    if func.return_type in CLASSICAL_RETURN_TYPES:
         params = ", ".join(_format_classical_param(ps) for ps in func.param_specs)
     else:
         param_parts: List[str] = []
         for ps in func.param_specs:
             formatted = _format_param_spec(ps)
-            if formatted == "qbit" and ps.name:
+            if formatted in ("qbit", "qvar") and ps.name:
                 param_parts.append(ps.name)
             else:
                 param_parts.append(f"{formatted} {ps.name}")

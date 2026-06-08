@@ -10,6 +10,12 @@ from quanta.lexer.lexer import Lexer, TokenType
 from quanta.parser.parser import Parser
 
 
+def test_lexer_tensor_product_operators():
+    tokens = Lexer().tokenize("A ⊙ B\nC ⊗ D\n")
+    types = [t.type for t in tokens if t.type not in (TokenType.NEWLINE, TokenType.EOF)]
+    assert types == [TokenType.IDENT, TokenType.HADAMARD, TokenType.IDENT, TokenType.IDENT, TokenType.KRON, TokenType.IDENT]
+
+
 def test_parse_simple_program():
     """Test parsing a simple program"""
     source = """
@@ -64,7 +70,7 @@ func float add(float a, float b) {
 
 
 def test_parse_function_unspecified_classical_params():
-    """Classical func with var return uses unspecified param kinds."""
+    """Classical func with var return uses cvar for unspecified params."""
     source = """
 func var add(a, b) {
     return a + b;
@@ -73,8 +79,8 @@ func var add(a, b) {
     func = Parser().parse(Lexer().tokenize(source)).statements[0]
     assert func.return_type == "var"
     assert [(ps.kind, ps.name) for ps in func.param_specs] == [
-        ("var", "a"),
-        ("var", "b"),
+        ("cvar", "a"),
+        ("cvar", "b"),
     ]
 
 
@@ -87,9 +93,36 @@ func int add(a, b) {
     func = Parser().parse(Lexer().tokenize(source)).statements[0]
     assert func.return_type == "int"
     assert [(ps.kind, ps.name) for ps in func.param_specs] == [
-        ("var", "a"),
-        ("var", "b"),
+        ("cvar", "a"),
+        ("cvar", "b"),
     ]
+
+
+def test_parse_function_unspecified_quantum_params():
+    source = """
+func bell(a, b) {
+    H(a);
+    CNot(a, b);
+}
+"""
+    func = Parser().parse(Lexer().tokenize(source)).statements[0]
+    assert func.return_type is None
+    assert [(ps.kind, ps.name) for ps in func.param_specs] == [
+        ("qvar", "a"),
+        ("qvar", "b"),
+    ]
+
+
+def test_parse_function_explicit_wildcard_params():
+    source = """
+func int pick(cvar x) { return x; }
+func apply(var q) { H(q); }
+func prep(qvar q) { H(q); }
+"""
+    funcs = Parser().parse(Lexer().tokenize(source)).statements
+    assert [(ps.kind, ps.name) for ps in funcs[0].param_specs] == [("cvar", "x")]
+    assert [(ps.kind, ps.name) for ps in funcs[1].param_specs] == [("var", "q")]
+    assert [(ps.kind, ps.name) for ps in funcs[2].param_specs] == [("qvar", "q")]
 
 
 def test_parse_for_loop():

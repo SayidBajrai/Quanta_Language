@@ -6,16 +6,21 @@ from typing import List, Optional
 from ..lexer.lexer import Token, TokenType
 from ..ast.nodes import (
     Program, Stmt, Expr,
-    VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl, ParamSpec,
+    VarDecl, ConstDecl, LetDecl, ClassicalNumericDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl, ParamSpec,
     ForStmt, WhileStmt, IfStmt, ReturnStmt, ExprStmt,
     CallExpr, IndexExpr, IndexItem, SingleIndex, SliceIndex, SliceFull, BinaryExpr, UnaryExpr,
     VarExpr, LiteralExpr, FStringExpr, FStringPart, ListExpr, GroupExpr, AssignExpr,
 )
 from ..errors import QuantaSyntaxError
 from ..types.tensor import TensorType
+from ..types.numeric import (
+    apply_numeric_defaults,
+    build_tensor_type,
+    dynamic_numeric_params,
+    finalize_numeric_params,
+)
+from ..types.kinds import CLASSICAL_RETURN_TYPES, is_classical_return_type
 from ..docs.comment_parser import ParsedDocComment, parse_doc_comment
-
-_CLASSICAL_TYPES = frozenset({"int", "float", "bool", "str", "var", "list", "dict"})
 
 
 class Parser:
@@ -71,9 +76,15 @@ class Parser:
             return self._parse_let_decl()
         elif self._check(TokenType.FLOAT, TokenType.INT, TokenType.BOOL, TokenType.STR):
             return self._parse_typed_var_decl()
-        elif (self._check(TokenType.QBIT) or self._check(TokenType.BIT) or self._check(TokenType.QINT)
-              or self._check(TokenType.BINT) or self._check(TokenType.QDEC) or self._check(TokenType.QFLOAT)):
-            return self._parse_quantum_decl()
+        elif self._check(TokenType.UINT, TokenType.DEC, TokenType.UDEC):
+            return self._parse_classical_numeric_decl()
+        elif self._check(TokenType.QBIT, TokenType.BIT, TokenType.BINT):
+            return self._parse_qbit_decl()
+        elif self._check(
+            TokenType.QINT, TokenType.QUINT, TokenType.QDEC, TokenType.QUDEC,
+            TokenType.QFLOAT, TokenType.QREAL,
+        ):
+            return self._parse_numeric_quantum_decl()
         elif self._match(TokenType.FOR):
             return self._parse_for()
         elif self._match(TokenType.WHILE):
@@ -106,24 +117,100 @@ class Parser:
         return parse_doc_comment(lines)
 
     def _parse_quantum_kind_token(self) -> str:
-        """Parse qbit/bit/qint/bint/qdec/qfloat keyword into kind string."""
+        """Parse a quantum type keyword into a kind string."""
         kind_token = self._advance()
-        if kind_token.type == TokenType.QBIT:
-            return "qbit"
-        if kind_token.type == TokenType.BIT:
-            return "bit"
-        if kind_token.type == TokenType.QINT:
-            return "qint"
-        if kind_token.type == TokenType.BINT:
-            return "bint"
-        if kind_token.type == TokenType.QDEC:
-            return "qdec"
-        if kind_token.type == TokenType.QFLOAT:
-            return "qfloat"
-        return "qbit"
+        mapping = {
+            TokenType.QBIT: "qbit",
+            TokenType.BIT: "bit",
+            TokenType.QINT: "qint",
+            TokenType.QUINT: "quint",
+            TokenType.BINT: "bint",
+            TokenType.QDEC: "qdec",
+            TokenType.QUDEC: "qudec",
+            TokenType.QFLOAT: "qfloat",
+            TokenType.QREAL: "qreal",
+        }
+        return mapping.get(kind_token.type, "qbit")
 
-    def _parse_quantum_type_prefix(self) -> tuple:
-        """Parse a quantum type prefix such as qbit[2] or bit."""
+    def _reject_bracket_numeric_syntax(self, kind: str) -> None:
+        if self._check(TokenType.LBRACKET):
+            raise QuantaSyntaxError(
+                f"{kind} uses parenthesis syntax, e.g. {kind}(8); bracket syntax is not supported"
+            )
+
+    def _parse_compile_time_int(self, label: str) -> int:
+        expr = self._parse_expression()
+        value = self._eval_compile_time_number(expr)
+        if value is not None and float(value).is_integer():
+            return int(value)
+        raise QuantaSyntaxError(f"{label} must be a compile-time integer literal")
+
+    def _parse_compile_time_float(self, label: str) -> float:
+        expr = self._parse_expression()
+        value = self._eval_compile_time_number(expr)
+        if value is not None:
+            return float(value)
+        raise QuantaSyntaxError(f"{label} must be a compile-time numeric literal")
+
+    def _eval_compile_time_number(self, expr: Expr) -> Optional[float]:
+        if isinstance(expr, LiteralExpr):
+            try:
+                return float(expr.value)
+            except (ValueError, TypeError):
+                return None
+        if isinstance(expr, UnaryExpr) and expr.op == "-":
+            inner = self._eval_compile_time_number(expr.right)
+            return -inner if inner is not None else None
+        if isinstance(expr, GroupExpr):
+            return self._eval_compile_time_number(expr.expr)
+        return None
+
+    def _parse_numeric_type_params(self, kind: str) -> dict:
+        """Parse optional ``kind(...)`` parameters; bare ``kind`` uses canonical defaults."""
+        self._reject_bracket_numeric_syntax(kind)
+        if not self._match(TokenType.LPAREN):
+            return apply_numeric_defaults(kind)
+        if kind == "qreal":
+            return self._parse_qreal_paren_params()
+        if kind in ("qdec", "qudec", "dec", "udec", "qfloat"):
+            return self._parse_two_int_paren_params(kind)
+        return self._parse_single_int_paren_params(kind)
+
+    def _parse_qreal_paren_params(self) -> dict:
+        if self._match(TokenType.RPAREN):
+            return apply_numeric_defaults("qreal")
+        lo = self._parse_compile_time_float("qreal min bound")
+        if self._match(TokenType.RPAREN):
+            raise QuantaSyntaxError("qreal requires min and max interval bounds")
+        self._consume(TokenType.COMMA, "Expected ',' in qreal(min, max[, qbits])")
+        hi = self._parse_compile_time_float("qreal max bound")
+        if self._match(TokenType.RPAREN):
+            return finalize_numeric_params("qreal", {"real_min": lo, "real_max": hi})
+        self._consume(TokenType.COMMA, "Expected ',' in qreal(min, max, qbits)")
+        qbits = self._parse_compile_time_int("qreal qbits")
+        self._consume(TokenType.RPAREN, "Expected ')' after qreal parameters")
+        return finalize_numeric_params(
+            "qreal", {"real_min": lo, "real_max": hi, "size": qbits}
+        )
+
+    def _parse_two_int_paren_params(self, kind: str) -> dict:
+        if self._match(TokenType.RPAREN):
+            return apply_numeric_defaults(kind)
+        a = self._parse_compile_time_int(f"{kind} int_bits")
+        self._consume(TokenType.COMMA, f"Expected ',' in {kind}(int_bits, frac_bits)")
+        b = self._parse_compile_time_int(f"{kind} frac_bits")
+        self._consume(TokenType.RPAREN, f"Expected ')' after {kind} parameters")
+        return finalize_numeric_params(kind, {"size": a, "size2": b})
+
+    def _parse_single_int_paren_params(self, kind: str) -> dict:
+        if self._match(TokenType.RPAREN):
+            return dynamic_numeric_params()
+        width = self._parse_compile_time_int(f"{kind} bit width")
+        self._consume(TokenType.RPAREN, f"Expected ')' after {kind} parameters")
+        return finalize_numeric_params(kind, {"size": width})
+
+    def _parse_qbit_type_prefix(self) -> tuple:
+        """Parse qbit/bit tensor types such as qbit[2] or bit."""
         kind = self._parse_quantum_kind_token()
         shape = self._parse_tensor_dimensions()
         size = None
@@ -138,18 +225,39 @@ class Parser:
             size = 1
         return kind, size, shape or [1]
 
+    def _parse_numeric_type_prefix(self) -> tuple:
+        """Parse numeric quantum type prefixes such as qint(4) or qreal(-1,1,8)."""
+        kind = self._parse_quantum_kind_token()
+        params = self._parse_numeric_type_params(kind)
+        return (
+            kind,
+            params["size"],
+            params["shape"],
+            params["size2"],
+            params.get("real_min"),
+            params.get("real_max"),
+        )
+
+    def _parse_quantum_type_prefix(self) -> tuple:
+        """Parse a quantum type prefix for function parameters."""
+        if self._check(TokenType.QBIT, TokenType.BIT):
+            kind, size, shape = self._parse_qbit_type_prefix()
+            return kind, size, shape, None, None, None
+        kind, size, shape, size2, real_min, real_max = self._parse_numeric_type_prefix()
+        return kind, size, shape, size2, real_min, real_max
+
     def _parse_param_spec(self, default_kind: str = "qbit") -> ParamSpec:
         """Parse a function parameter, optionally typed."""
         if self._check(
-            TokenType.QBIT, TokenType.BIT, TokenType.QINT, TokenType.BINT,
-            TokenType.QDEC, TokenType.QFLOAT,
+            TokenType.QBIT, TokenType.BIT, TokenType.QINT, TokenType.QUINT, TokenType.BINT,
+            TokenType.QDEC, TokenType.QUDEC, TokenType.QFLOAT, TokenType.QREAL,
         ):
-            kind, size, shape = self._parse_quantum_type_prefix()
+            kind, size, shape, _, _, _ = self._parse_quantum_type_prefix()
             name = self._consume(TokenType.IDENT, "Expected parameter name").value
             return ParamSpec(kind, name, size, shape)
         if self._check(
             TokenType.INT, TokenType.FLOAT, TokenType.BOOL, TokenType.STR,
-            TokenType.LIST, TokenType.DICT, TokenType.VAR,
+            TokenType.LIST, TokenType.DICT, TokenType.VAR, TokenType.QVAR, TokenType.CVAR,
         ):
             kind = self._advance().value
             name = self._consume(TokenType.IDENT, "Expected parameter name").value
@@ -165,8 +273,11 @@ class Parser:
 
         if self._match(TokenType.VAR):
             return_type = "var"
-        elif self._check(TokenType.QBIT, TokenType.BIT, TokenType.QINT, TokenType.BINT):
-            return_kind, return_size, _ = self._parse_quantum_type_prefix()
+        elif self._check(
+            TokenType.QBIT, TokenType.BIT, TokenType.QINT, TokenType.QUINT, TokenType.BINT,
+            TokenType.QDEC, TokenType.QUDEC, TokenType.QFLOAT, TokenType.QREAL,
+        ):
+            return_kind, return_size, _, _, _, _ = self._parse_quantum_type_prefix()
             return_type = return_kind
         elif self._check_type():
             return_type = self._advance().value
@@ -174,7 +285,7 @@ class Parser:
         name = self._consume(TokenType.IDENT, "Expected function name").value
 
         self._consume(TokenType.LPAREN, "Expected '(' after function name")
-        default_param_kind = "var" if return_type in _CLASSICAL_TYPES else "qbit"
+        default_param_kind = "cvar" if is_classical_return_type(return_type) else "qvar"
         params: List[str] = []
         param_specs: List[ParamSpec] = []
         if not self._check(TokenType.RPAREN):
@@ -319,101 +430,72 @@ class Parser:
         self._match(TokenType.SEMICOLON)
         return LetDecl(name, value)
     
-    def _parse_quantum_decl(self) -> QuantumDecl:
-        """Parse quantum register declaration"""
+    def _parse_classical_numeric_decl(self) -> ClassicalNumericDecl:
         kind_token = self._advance()
-        if kind_token.type == TokenType.QBIT:
-            kind = "qbit"
-        elif kind_token.type == TokenType.BIT:
-            kind = "bit"
-        elif kind_token.type == TokenType.QINT:
-            kind = "qint"
-        elif kind_token.type == TokenType.BINT:
-            kind = "bint"
-        elif kind_token.type == TokenType.QDEC:
-            kind = "qdec"
-        elif kind_token.type == TokenType.QFLOAT:
-            kind = "qfloat"
-        else:
-            kind = "qbit"  # Default
-
-        shape: List[Optional[int]] = []
-        size = None
-        size2 = None
-
-        if self._match(TokenType.LBRACKET):
-            if kind in ("qdec", "qfloat"):
-                size_expr = self._parse_expression()
-                if isinstance(size_expr, LiteralExpr):
-                    try:
-                        size = int(size_expr.value)
-                    except (ValueError, TypeError):
-                        pass
-                self._consume(TokenType.COMMA, "Expected ',' in qdec/qfloat dimensions")
-                size2_expr = self._parse_expression()
-                if isinstance(size2_expr, LiteralExpr):
-                    try:
-                        size2 = int(size2_expr.value)
-                    except (ValueError, TypeError):
-                        pass
-                shape = [size, size2]
-                self._consume(TokenType.RBRACKET, "Expected ']' after size")
-            else:
-                if self._check(TokenType.RBRACKET):
-                    self._advance()
-                    shape = [None]
-                else:
-                    size_expr = self._parse_expression()
-                    dim: Optional[int] = None
-                    if isinstance(size_expr, LiteralExpr):
-                        try:
-                            dim = int(size_expr.value)
-                        except (ValueError, TypeError):
-                            dim = None
-                    shape = [dim]
-                    self._consume(TokenType.RBRACKET, "Expected ']' after size")
-                while self._match(TokenType.LBRACKET):
-                    if self._check(TokenType.RBRACKET):
-                        self._advance()
-                        shape.append(None)
-                    else:
-                        size_expr = self._parse_expression()
-                        dim = None
-                        if isinstance(size_expr, LiteralExpr):
-                            try:
-                                dim = int(size_expr.value)
-                            except (ValueError, TypeError):
-                                dim = None
-                        shape.append(dim)
-                        self._consume(TokenType.RBRACKET, "Expected ']' after tensor dimension")
-                if shape:
-                    if all(d is not None for d in shape):
-                        size = 1
-                        for dim in shape:
-                            size *= dim  # type: ignore[operator]
-                    elif len(shape) == 1 and shape[0] is not None:
-                        size = shape[0]
-        else:
-            shape = [1]
-
-        tensor_type = None
-        if kind not in ("qdec", "qfloat"):
-            tensor_type = TensorType.from_quantum(kind, tuple(shape)) if shape else TensorType.from_quantum(kind, (1,))
-
-        name = self._consume(TokenType.IDENT, "Expected register name").value
-        
-        # Check for initialization value after the name
+        kind = {TokenType.UINT: "uint", TokenType.DEC: "dec", TokenType.UDEC: "udec"}[kind_token.type]
+        params = self._parse_numeric_type_params(kind)
+        finalized = finalize_numeric_params(kind, params)
+        name = self._consume(TokenType.IDENT, "Expected variable name").value
         value = None
         if self._match(TokenType.EQ):
             value = self._parse_expression()
-        
-        self._match(TokenType.SEMICOLON)  # Optional semicolon
-        
+        self._match(TokenType.SEMICOLON)
+        return ClassicalNumericDecl(
+            kind,
+            finalized["size"],
+            name,
+            value,
+            finalized["size2"],
+            tensor_type=build_tensor_type(kind, params),
+        )
+
+    def _parse_qbit_decl(self) -> QuantumDecl:
+        """Parse qbit/bit tensor declarations using bracket syntax."""
+        kind = self._parse_quantum_kind_token()
+        shape = self._parse_tensor_dimensions()
+        size = None
+        if shape:
+            if all(d is not None for d in shape):
+                size = 1
+                for dim in shape:
+                    size *= dim  # type: ignore[operator]
+            elif len(shape) == 1 and shape[0] is not None:
+                size = shape[0]
+        if size is None:
+            size = 1
+        tensor_type = TensorType.from_quantum(kind, tuple(shape or [1]))
+        name = self._consume(TokenType.IDENT, "Expected register name").value
+        value = None
+        if self._match(TokenType.EQ):
+            value = self._parse_expression()
+        self._match(TokenType.SEMICOLON)
         return QuantumDecl(
             kind, size, name, value,
             shape=shape or [1],
             tensor_type=tensor_type,
-            size2=size2,
+        )
+
+    def _parse_numeric_quantum_decl(self) -> QuantumDecl:
+        """Parse numeric quantum declarations using parenthesis syntax."""
+        kind = self._parse_quantum_kind_token()
+        params = self._parse_numeric_type_params(kind)
+        finalized = finalize_numeric_params(kind, params)
+        tensor_type = build_tensor_type(kind, params)
+        name = self._consume(TokenType.IDENT, "Expected register name").value
+        value = None
+        if self._match(TokenType.EQ):
+            value = self._parse_expression()
+        self._match(TokenType.SEMICOLON)
+        return QuantumDecl(
+            kind,
+            finalized["size"],
+            name,
+            value,
+            shape=finalized["shape"],
+            tensor_type=tensor_type,
+            size2=finalized["size2"],
+            real_min=finalized.get("real_min"),
+            real_max=finalized.get("real_max"),
         )
     
     def _parse_for(self) -> ForStmt:
@@ -543,15 +625,31 @@ class Parser:
     
     def _parse_term(self) -> Expr:
         """Parse addition/subtraction"""
-        expr = self._parse_factor()
+        expr = self._parse_kron()
         while self._match(TokenType.PLUS, TokenType.MINUS):
             op = self._previous().value
-            right = self._parse_factor()
+            right = self._parse_kron()
             expr = BinaryExpr(expr, op, right)
+        return expr
+
+    def _parse_kron(self) -> Expr:
+        """Parse Kronecker product (A ⊗ B)"""
+        expr = self._parse_hadamard()
+        while self._match(TokenType.KRON):
+            right = self._parse_hadamard()
+            expr = CallExpr(VarExpr("TensorProduct"), [expr, right])
+        return expr
+
+    def _parse_hadamard(self) -> Expr:
+        """Parse elementwise product (A ⊙ B)"""
+        expr = self._parse_factor()
+        while self._match(TokenType.HADAMARD):
+            right = self._parse_factor()
+            expr = CallExpr(VarExpr("ElementwiseProduct"), [expr, right])
         return expr
     
     def _parse_factor(self) -> Expr:
-        """Parse multiplication/division"""
+        """Parse multiplication/division ( * is cross product on 3D vectors at runtime)"""
         expr = self._parse_dot()
         while self._match(TokenType.STAR, TokenType.SLASH, TokenType.PERCENT):
             op = self._previous().value
@@ -781,9 +879,13 @@ class Parser:
     
     def _check_type(self) -> bool:
         """Check if current token is a type"""
-        return self._check(TokenType.INT, TokenType.FLOAT, TokenType.BOOL, TokenType.STR, 
-                          TokenType.LIST, TokenType.DICT, TokenType.VAR, TokenType.QINT, TokenType.BINT,
-                          TokenType.QBIT, TokenType.BIT, TokenType.QDEC, TokenType.QFLOAT)
+        return self._check(
+            TokenType.INT, TokenType.FLOAT, TokenType.BOOL, TokenType.STR,
+            TokenType.LIST, TokenType.DICT, TokenType.VAR, TokenType.QVAR, TokenType.CVAR,
+            TokenType.QINT, TokenType.QUINT, TokenType.BINT,
+            TokenType.QBIT, TokenType.BIT, TokenType.QDEC, TokenType.QUDEC, TokenType.QFLOAT, TokenType.QREAL,
+            TokenType.UINT, TokenType.DEC, TokenType.UDEC,
+        )
     
     def _match(self, *types: TokenType) -> bool:
         """Match and consume if any type matches"""

@@ -53,19 +53,19 @@ Measure(q, c)
 def test_qdec_declaration():
     """Test qdec fixed-point register lowering"""
     source = """
-qdec[4, 4] x;
+qudec(4,4) fp;
 """
     qasm = compile(source)
-    assert "qubit[8] x" in qasm
+    assert "qubit[8] fp" in qasm
 
 
 def test_qfloat_declaration():
     """Test qfloat register lowering"""
     source = """
-qfloat[5, 10] y;
+qfloat(5,10) qf;
 """
     qasm = compile(source)
-    assert "qubit[16] y" in qasm
+    assert "qubit[16] qf" in qasm
 
 
 def test_high_level_bell_gate():

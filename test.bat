@@ -26,8 +26,10 @@ if errorlevel 1 (
 
 echo.
 echo Running pytest...
-echo   - qint operator desugaring (QAdd/QSub/QMult/QDiv/QMod)
-echo   - frontend arithmetic simulation (QAdd/QSub/QMult)
+echo   - numeric types: bare defaults (qint/qdec/qreal) and () syntax
+echo   - signed two's complement and qreal interval mapping
+echo   - quint operator desugaring (QAdd/QSub/QMult/QDiv/QMod)
+echo   - frontend arithmetic simulation
 echo   - OpenQASM lowering
 echo.
 

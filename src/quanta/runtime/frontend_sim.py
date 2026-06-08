@@ -21,7 +21,7 @@ except ImportError:
 
 from ..ast.nodes import (
     Program, Stmt, Expr,
-    VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
+    VarDecl, ConstDecl, LetDecl, ClassicalNumericDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
     ForStmt, IfStmt, ExprStmt, ReturnStmt,
     CallExpr, IndexExpr, BinaryExpr, UnaryExpr,
     VarExpr, LiteralExpr, ListExpr, GroupExpr, FStringExpr, AssignExpr,
@@ -56,6 +56,7 @@ from .tensor_algebra import (
     tensor_product,
     tensor_shape,
     tensor_elementwise_binop,
+    tensor_star_product,
 )
 from .tensors import (
     eval_literal_value,
@@ -70,7 +71,7 @@ __all__ = ["get_prints", "statevector_to_symbolic"]
 
 SIMULATION_QBIT_LIMIT = 20
 
-_CLASSICAL_RETURN_TYPES = frozenset({"int", "float", "bool", "str", "var", "list", "dict"})
+from ..types.kinds import CLASSICAL_RETURN_TYPES as _CLASSICAL_RETURN_TYPES
 
 
 _SIMULATED_ARITHMETIC = frozenset({
@@ -146,17 +147,14 @@ def get_prints(quanta_code: str) -> str:
     global_qbit = 0
     for stmt in ast.statements:
         if isinstance(stmt, QuantumDecl):
-            if stmt.kind == "qdec" and stmt.size is not None and stmt.size2 is not None:
-                size = stmt.size + stmt.size2
-            elif stmt.kind == "qfloat" and stmt.size is not None and stmt.size2 is not None:
-                size = 1 + stmt.size + stmt.size2
-            else:
-                size = stmt.size or 1
+            from ..types.numeric import flat_qubit_count
+
+            size = flat_qubit_count(stmt.kind, stmt.size, stmt.size2)
             shape = [d if d is not None else 1 for d in (stmt.shape or [size])]
             reg_sizes[stmt.name] = size
             reg_shapes[stmt.name] = shape
             reg_kind[stmt.name] = stmt.kind
-            if stmt.kind in ("qbit", "qint", "qdec", "qfloat"):
+            if stmt.kind in ("qbit", "qint", "quint", "qdec", "qudec", "qfloat", "qreal"):
                 for i in range(size):
                     qbit_map[(stmt.name, i)] = global_qbit
                     global_qbit += 1
@@ -256,6 +254,9 @@ def get_prints(quanta_code: str) -> str:
         if isinstance(expr, BinaryExpr):
             l = eval_expr(expr.left, ctx)
             r = eval_expr(expr.right, ctx)
+            if expr.op == "*":
+                if isinstance(l, list) or isinstance(r, list):
+                    return tensor_star_product(l, r)
             if isinstance(l, list) or isinstance(r, list):
                 return tensor_elementwise_binop(l, r, expr.op)
             if expr.op == "+":
@@ -440,7 +441,9 @@ def get_prints(quanta_code: str) -> str:
         qubits = []
         params = []
         for a in args:
-            if isinstance(a, VarExpr) and reg_kind.get(a.name, "") in ("qbit", "qint", "qdec", "qfloat"):
+            if isinstance(a, VarExpr) and reg_kind.get(a.name, "") in (
+                "qbit", "qint", "quint", "qdec", "qudec", "qfloat", "qreal"
+            ):
                 sz = reg_sizes.get(a.name, 1)
                 qubits.extend([qbit_map[(a.name, i)] for i in range(sz)])
             elif isinstance(a, IndexExpr) and isinstance(a.base, VarExpr):
@@ -537,7 +540,7 @@ def get_prints(quanta_code: str) -> str:
 
     def resolve_register_qubits(arg: Expr) -> Optional[List[int]]:
         if isinstance(arg, VarExpr) and arg.name in reg_kind:
-            if reg_kind[arg.name] in ("qbit", "qint", "qdec", "qfloat"):
+            if reg_kind[arg.name] in ("qbit", "qint", "quint", "qdec", "qudec", "qfloat", "qreal"):
                 size = reg_sizes.get(arg.name, 1)
                 return [qbit_map[(arg.name, i)] for i in range(size)]
         return None
@@ -707,18 +710,31 @@ def get_prints(quanta_code: str) -> str:
 
     def run_statement(stmt: Stmt, ctx: Dict[str, Any]) -> None:
         if isinstance(stmt, QuantumDecl):
-            if stmt.kind == "qdec" and stmt.size is not None and stmt.size2 is not None:
-                size = stmt.size + stmt.size2
-            elif stmt.kind == "qfloat" and stmt.size is not None and stmt.size2 is not None:
-                size = 1 + stmt.size + stmt.size2
-            else:
-                size = stmt.size or 1
-            if stmt.kind in ("qbit", "qint", "qdec", "qfloat") and stmt.value:
-                if isinstance(stmt.value, LiteralExpr):
+            from ..types.numeric import flat_qubit_count, init_bit_pattern, qreal_nearest_index
+
+            size = flat_qubit_count(stmt.kind, stmt.size, stmt.size2)
+            if stmt.kind in ("qbit", "qint", "quint", "qdec", "qudec", "qfloat", "qreal") and stmt.value:
+                from ..lower.init_value import compile_time_number
+
+                raw_init = compile_time_number(stmt.value)
+                if raw_init is not None:
                     try:
-                        val = int(stmt.value.value)
+                        if stmt.kind == "qreal":
+                            lo = stmt.real_min if stmt.real_min is not None else 0.0
+                            hi = stmt.real_max if stmt.real_max is not None else 1.0
+                            pattern = qreal_nearest_index(
+                                float(raw_init), stmt.size or 1, lo, hi
+                            )
+                        elif stmt.kind in ("qdec", "qudec"):
+                            pattern = init_bit_pattern(
+                                float(raw_init), stmt.kind, stmt.size or 1, stmt.size2 or 0
+                            )
+                        elif stmt.kind == "qint":
+                            pattern = init_bit_pattern(int(raw_init), "qint", stmt.size or 1)
+                        else:
+                            pattern = init_bit_pattern(int(raw_init), stmt.kind, stmt.size or 1)
                         for i in range(size):
-                            if (val >> i) & 1:
+                            if (pattern >> i) & 1:
                                 circuit.x(qbit_map[(stmt.name, i)])
                     except (ValueError, TypeError):
                         pass

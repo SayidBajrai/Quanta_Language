@@ -13,10 +13,10 @@ def _dominant_ket(out: str) -> str:
 
 def test_grover_amplifies_target():
     source = """
-qint[3] x
-H(x)
-Grover(x, 5)
-Print(f"{x}")
+quint(3) reg
+H(reg)
+Grover(reg, 5)
+Print(f"{reg}")
 """
     out = get_prints(source)
     assert "|101" in out
@@ -25,7 +25,7 @@ Print(f"{x}")
 
 def test_grover_compiles_with_gates():
     qasm = compile(
-        "qint[3] x\nH(x)\nGrover(x, 5)"
+        "quint(3) reg\nH(reg)\nGrover(reg, 5)"
     )
     assert "Grover iteration" in qasm
     assert "h " in qasm
@@ -36,7 +36,7 @@ def test_grover_structured_lowering():
     from quanta.compiler import Compiler
 
     qasm = Compiler().compile(
-        "qint[2] a\nGrover(a, 3)", keep_structure=True
+        "quint(2) a\nGrover(a, 3)", keep_structure=True
     )
     assert "__Grover_2_3" in qasm
     assert "h " in qasm

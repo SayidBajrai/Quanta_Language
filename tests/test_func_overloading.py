@@ -41,8 +41,8 @@ def test_func_param_signature_key():
 
 def test_register_duplicate_overload_rejected():
     source = INT_ADD + """
-func int add(int x, int y) {
-    return x + y;
+func int add(int m, int n) {
+    return m + n;
 }
 """
     with pytest.raises(QuantaSemanticError, match="Duplicate function overload"):

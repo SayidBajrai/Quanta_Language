@@ -5,7 +5,7 @@ OpenQASM 3 code generator
 from typing import List, Dict, Optional, Tuple
 from ..ast.nodes import (
     Program, Stmt, Expr,
-    VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
+    VarDecl, ConstDecl, LetDecl, ClassicalNumericDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
     ForStmt, WhileStmt, IfStmt, ReturnStmt, ExprStmt,
     CallExpr, IndexExpr, SingleIndex, SliceIndex, BinaryExpr, UnaryExpr,
     VarExpr, LiteralExpr, ListExpr, GroupExpr, AssignExpr,
@@ -107,9 +107,9 @@ class QASM3Generator(Visitor):
         for stmt in ast.statements:
             if isinstance(stmt, GateDecl):
                 self.gates[stmt.name] = stmt
-            if isinstance(stmt, QuantumDecl) and stmt.kind == "qint":
+            if isinstance(stmt, QuantumDecl) and stmt.kind in ("qint", "quint"):
                 size = stmt.size or 1
-                self.registers[stmt.name] = ("qint", size)
+                self.registers[stmt.name] = (stmt.kind, size)
                 if stmt.value and isinstance(stmt.value, LiteralExpr):
                     try:
                         self.register_init[stmt.name] = int(stmt.value.value)
@@ -174,41 +174,48 @@ class QASM3Generator(Visitor):
     def visit_var_decl(self, node: VarDecl) -> None:
         """Variable declarations don't generate QASM"""
         pass
+
+    def visit_classical_numeric_decl(self, node: ClassicalNumericDecl) -> None:
+        """Classical numeric types are frontend-only."""
+        pass
     
     def visit_quantum_decl(self, node: QuantumDecl) -> None:
         """Generate quantum register declaration"""
-        # Compute total size: single dimension or qdec/qfloat two-dimension
-        if node.kind == "qdec" and node.size is not None and node.size2 is not None:
-            size = node.size + node.size2  # int_bits + frac_bits
-        elif node.kind == "qfloat" and node.size is not None and node.size2 is not None:
-            size = 1 + node.size + node.size2  # sign + exponent_bits + mantissa_bits
-        else:
-            size = node.size or 1
+        from ..types.numeric import flat_qubit_count, init_bit_pattern, qreal_nearest_index
+
+        size = flat_qubit_count(node.kind, node.size, node.size2)
         self.registers[node.name] = (node.kind, size)
-        
-        # Map qbit/qint/qdec/qfloat to qubit and bint to bit for QASM output
+
         qasm_kind = node.kind
-        if qasm_kind in ("qbit", "qint", "qdec", "qfloat"):
+        if qasm_kind in ("qbit", "qint", "quint", "qdec", "qudec", "qfloat", "qreal"):
             qasm_kind = "qubit"
         elif qasm_kind == "bint":
             qasm_kind = "bit"
-        
+
         self.lines.append(f"{qasm_kind}[{size}] {node.name};")
-        
-        # Handle initialization if present
-        if node.value:
-            # For qint initialization like qint[3] x = 2
-            # We need to initialize the register and apply NOT gates
-            if isinstance(node.value, LiteralExpr):
-                try:
-                    init_value = int(node.value.value)
-                    # Initialize to |0⟩ (already done by declaration)
-                    # Then apply NOT gates to set bits
-                    for i in range(size):
-                        if (init_value >> i) & 1:
-                            self.lines.append(f"x {node.name}[{i}];")
-                except (ValueError, TypeError):
-                    pass
+
+        from .init_value import compile_time_number
+
+        raw_init = compile_time_number(node.value) if node.value else None
+        if raw_init is not None:
+            try:
+                if node.kind == "qreal":
+                    lo = node.real_min if node.real_min is not None else 0.0
+                    hi = node.real_max if node.real_max is not None else 1.0
+                    pattern = qreal_nearest_index(float(raw_init), node.size or 1, lo, hi)
+                elif node.kind in ("qdec", "qudec"):
+                    pattern = init_bit_pattern(
+                        float(raw_init), node.kind, node.size or 1, node.size2 or 0
+                    )
+                elif node.kind == "qint":
+                    pattern = init_bit_pattern(int(raw_init), "qint", node.size or 1)
+                else:
+                    pattern = init_bit_pattern(int(raw_init), node.kind, node.size or 1)
+                for i in range(size):
+                    if (pattern >> i) & 1:
+                        self.lines.append(f"x {node.name}[{i}];")
+            except (ValueError, TypeError):
+                pass
     
     def visit_func_decl(self, node: FuncDecl) -> None:
         """Function declarations are inlined, not generated"""
@@ -356,7 +363,7 @@ class QASM3Generator(Visitor):
                     if q_name in self.registers and c_name in self.registers:
                         q_kind, q_size = self.registers[q_name]
                         c_kind, c_size = self.registers[c_name]
-                        if q_kind in ("qbit", "qint", "qdec", "qfloat") and c_kind in ("bit", "bint"):
+                        if q_kind in ("qbit", "qint", "quint", "qdec", "qudec", "qfloat", "qreal") and c_kind in ("bit", "bint"):
                             size = min(q_size, c_size)
                             for i in range(size):
                                 self.lines.append(f"measure {q_name}[{i}] -> {c_name}[{i}];")
@@ -853,7 +860,7 @@ class QASM3Generator(Visitor):
                 if arg.name not in self.registers:
                     return None
                 kind, size = self.registers[arg.name]
-                if kind not in ("qbit", "qint", "qdec", "qfloat"):
+                if kind not in ("qbit", "qint", "quint", "qdec", "qudec", "qfloat", "qreal"):
                     return None
                 for i in range(size):
                     result.append(IndexExpr(VarExpr(arg.name), [SingleIndex(LiteralExpr(i))]))
@@ -1092,6 +1099,8 @@ class QASM3Generator(Visitor):
             return self.visit_const_decl(node)
         elif isinstance(node, LetDecl):
             return self.visit_let_decl(node)
+        elif isinstance(node, ClassicalNumericDecl):
+            return self.visit_classical_numeric_decl(node)
         elif isinstance(node, QuantumDecl):
             return self.visit_quantum_decl(node)
         elif isinstance(node, FuncDecl):

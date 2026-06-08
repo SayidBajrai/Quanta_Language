@@ -4,11 +4,13 @@ AST transformations for operator overloading and desugaring
 
 from typing import Dict, List, Optional, Set, Tuple, Union
 
+from ..types.tensor import TensorType
 from ..ast.nodes import (
     Program,
     Stmt,
     Expr,
     VarDecl,
+    ClassicalNumericDecl,
     QuantumDecl,
     FuncDecl,
     GateDecl,
@@ -70,13 +72,15 @@ class ASTTransformer(Visitor):
         """Transform AST by desugaring operator overloading"""
         for stmt in ast.statements:
             if isinstance(stmt, QuantumDecl):
-                if stmt.kind == "qint":
-                    if stmt.shape and any(d is None for d in stmt.shape):
-                        self.symbols[stmt.name] = "qint[]"
-                    else:
-                        self.symbols[stmt.name] = f"qint[{stmt.size or 1}]"
+                if stmt.tensor_type:
+                    self.symbols[stmt.name] = stmt.tensor_type.format()
+                elif stmt.shape and any(d is None for d in stmt.shape):
+                    self.symbols[stmt.name] = f"{stmt.kind}()"
                 else:
-                    self.symbols[stmt.name] = f"{stmt.kind}[{stmt.size or 1}]"
+                    self.symbols[stmt.name] = f"{stmt.kind}({stmt.size or 1})"
+            elif isinstance(stmt, ClassicalNumericDecl):
+                if stmt.tensor_type:
+                    self.symbols[stmt.name] = stmt.tensor_type.format()
             elif isinstance(stmt, VarDecl) and stmt.type_hint:
                 self.symbols[stmt.name] = stmt.type_hint
 
@@ -91,17 +95,20 @@ class ASTTransformer(Visitor):
         return Program(transformed_statements)
 
     def _transform_statement(self, stmt: Stmt) -> Union[Stmt, List[Stmt]]:
+        if isinstance(stmt, ClassicalNumericDecl):
+            return stmt
+
         if isinstance(stmt, VarDecl):
             if stmt.value and isinstance(stmt.value, BinaryExpr):
                 if stmt.value.op in _QINT_OP_TO_FUNC:
                     stmt_type = stmt.type_hint or ""
-                    if stmt_type.startswith("qint"):
+                    if stmt_type.startswith("quint") or stmt_type.startswith("qint"):
                         return self._transform_qint_assignment(stmt)
             return stmt
 
         if isinstance(stmt, QuantumDecl):
             if (
-                stmt.kind == "qint"
+                stmt.kind in ("quint", "qint")
                 and stmt.value
                 and isinstance(stmt.value, CallExpr)
                 and isinstance(stmt.value.callee, VarExpr)
@@ -109,7 +116,7 @@ class ASTTransformer(Visitor):
             ):
                 return self._transform_qint_call_initializer(stmt, stmt.value)
             if stmt.value and isinstance(stmt.value, BinaryExpr):
-                if stmt.value.op in _QINT_OP_TO_FUNC and stmt.kind == "qint":
+                if stmt.value.op in _QINT_OP_TO_FUNC and stmt.kind in ("quint", "qint"):
                     return self._transform_qint_quantum_decl(stmt)
             if stmt.value:
                 transformed = self._transform_expression(stmt.value)
@@ -227,10 +234,12 @@ class ASTTransformer(Visitor):
         return infer_qint_width(expr, self.symbols)
 
     def _qint_symbol_type(self, size: int) -> str:
-        return f"qint[{size}]"
+        return f"quint({size})"
 
     def _make_qint_decl(self, name: str, size: int, init: Optional[Expr] = None) -> QuantumDecl:
-        return QuantumDecl("qint", size, name, init, shape=[size])
+        return QuantumDecl(
+            "quint", size, name, init, shape=[size], tensor_type=TensorType("quint", (size,))
+        )
 
     def _ensure_temp_decl(self, name: str, size: int, stmts: List[Stmt]) -> None:
         if name in self._declared_temps:

@@ -5,7 +5,7 @@ Semantic analyzer for Quanta
 from typing import Dict, Optional, List, Any
 from ..ast.nodes import (
     Program, Stmt, Expr,
-    VarDecl, ConstDecl, LetDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
+    VarDecl, ConstDecl, LetDecl, ClassicalNumericDecl, QuantumDecl, FuncDecl, GateDecl, ClassDecl,
     ForStmt, WhileStmt, IfStmt, ReturnStmt, ExprStmt,
     CallExpr, IndexExpr, SingleIndex, SliceIndex, SliceFull, BinaryExpr, UnaryExpr,
     VarExpr, LiteralExpr, FStringExpr, ListExpr, GroupExpr, AssignExpr,
@@ -21,7 +21,9 @@ from .indexing import (
     effective_arg_count,
 )
 from .overload import FuncOverloadTable, infer_expr_type, resolve_func_overload
+from .reserved_names import validate_qasm_identifier
 from .typecheck import tensor_type_from_decl, tensor_type_from_quantum, eval_literal_list
+from ..types.kinds import param_symbol_type, type_base
 
 
 class Symbol:
@@ -69,19 +71,29 @@ class SemanticAnalyzer:
         # First pass: collect declarations
         for stmt in ast.statements:
             if isinstance(stmt, QuantumDecl):
+                validate_qasm_identifier(stmt.name, "register name")
                 tensor_type = tensor_type_from_quantum(stmt)
                 self.symbols[stmt.name] = Symbol(stmt.name, tensor_type.format())
                 if tensor_type.shape():
                     self.tensor_shapes[stmt.name] = tensor_type.shape()
             elif isinstance(stmt, FuncDecl):
+                validate_qasm_identifier(stmt.name, "function name")
+                for pspec in stmt.param_specs:
+                    validate_qasm_identifier(pspec.name, "parameter name")
                 self.func_overloads.register(stmt)
             elif isinstance(stmt, GateDecl):
+                validate_qasm_identifier(stmt.name, "gate name")
+                for param in stmt.params:
+                    validate_qasm_identifier(param, "parameter name")
                 self.gates[stmt.name] = stmt
             elif isinstance(stmt, ConstDecl):
                 self.constants[stmt.name] = stmt
                 self.symbols[stmt.name] = Symbol(stmt.name, "const", stmt.value)
             elif isinstance(stmt, LetDecl):
                 self.symbols[stmt.name] = Symbol(stmt.name, "let", stmt.value)
+            elif isinstance(stmt, ClassicalNumericDecl):
+                if stmt.tensor_type:
+                    self.symbols[stmt.name] = Symbol(stmt.name, stmt.tensor_type.format())
             elif isinstance(stmt, VarDecl):
                 tensor_type = tensor_type_from_decl(stmt)
                 self.symbols[stmt.name] = Symbol(stmt.name, tensor_type.format(), stmt.value)
@@ -102,11 +114,14 @@ class SemanticAnalyzer:
             self._validate_expression(stmt.value)
         elif isinstance(stmt, LetDecl):
             self._validate_expression(stmt.value)
+        elif isinstance(stmt, ClassicalNumericDecl):
+            if stmt.value:
+                self._validate_expression(stmt.value)
         elif isinstance(stmt, QuantumDecl):
-            if stmt.kind == "qint" and stmt.shape and any(d is None for d in stmt.shape):
+            if stmt.kind in ("quint", "qint") and stmt.shape and any(d is None for d in stmt.shape):
                 if stmt.value is None:
                     raise QuantaSemanticError(
-                        "qint[] requires an initializer for size inference or an explicit bit width"
+                        f"{stmt.kind}() requires an initializer for size inference or an explicit bit width"
                     )
         elif isinstance(stmt, FuncDecl):
             self._validate_function(stmt)
@@ -129,7 +144,12 @@ class SemanticAnalyzer:
         saved_symbols = {}
         for pspec in func.param_specs:
             saved_symbols[pspec.name] = self.symbols.get(pspec.name)
-            self.symbols[pspec.name] = Symbol(pspec.name, pspec.kind)
+            sym_type = param_symbol_type(pspec.kind)
+            if pspec.shape and sym_type == "qbit" and pspec.kind == "qvar":
+                if any(d is not None for d in pspec.shape):
+                    dims = "".join(f"[{d}]" if d is not None else "[]" for d in pspec.shape)
+                    sym_type = f"qbit{dims}"
+            self.symbols[pspec.name] = Symbol(pspec.name, sym_type)
 
         has_return = any(isinstance(s, ReturnStmt) for s in func.body)
         if self.keep_structure and func.return_type and func.return_type != "var" and not has_return:
@@ -139,6 +159,7 @@ class SemanticAnalyzer:
 
         for stmt in func.body:
             if isinstance(stmt, QuantumDecl):
+                validate_qasm_identifier(stmt.name, "register name")
                 self.symbols[stmt.name] = Symbol(stmt.name, stmt.kind)
             self._validate_statement(stmt)
 
@@ -389,11 +410,17 @@ class SemanticAnalyzer:
     def _is_qbit_register_expr(self, expr: Expr) -> bool:
         if isinstance(expr, VarExpr):
             sym = self.symbols.get(expr.name)
-            if sym and sym.type.startswith(("qbit", "qint", "qdec", "qfloat")):
+            if sym and (
+                type_base(sym.type) == "qvar"
+                or sym.type.startswith(("qbit", "qint", "quint", "qdec", "qudec", "qfloat", "qreal"))
+            ):
                 return True
         if isinstance(expr, IndexExpr) and isinstance(expr.base, VarExpr):
             sym = self.symbols.get(expr.base.name)
-            if sym and sym.type.startswith(("qbit", "qint", "qdec", "qfloat")):
+            if sym and (
+                type_base(sym.type) == "qvar"
+                or sym.type.startswith(("qbit", "qint", "quint", "qdec", "qudec", "qfloat", "qreal"))
+            ):
                 return True
         return False
 
@@ -552,7 +579,7 @@ class SemanticAnalyzer:
             sym = self.symbols.get(expr.name)
             if sym:
                 tensor_type = TensorType.parse_legacy(sym.type)
-                if tensor_type.base == "qint":
+                if tensor_type.base in ("qint", "quint"):
                     return tensor_type.total_size()
         elif isinstance(expr, IndexExpr) and isinstance(expr.base, VarExpr):
             return self._expr_qint_width(expr.base)

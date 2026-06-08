@@ -22,15 +22,22 @@ from ..ast.nodes import (
     VarExpr,
 )
 from ..errors import QuantaSemanticError
+from ..types.kinds import (
+    CLASSICAL_TYPES,
+    is_classical_type,
+    is_quantum_type,
+    type_base,
+    wildcard_match_score,
+)
 
 ParamSig = Tuple[str, ...]
-
-_CLASSICAL_TYPES = frozenset({"int", "float", "bool", "str", "var", "list", "dict"})
 
 
 def format_param_type(ps: ParamSpec) -> str:
     """Canonical type string for one parameter in an overload signature."""
-    if ps.kind in _CLASSICAL_TYPES:
+    if ps.kind in CLASSICAL_TYPES or type_base(ps.kind) in ("var", "qvar", "cvar"):
+        if ps.kind in CLASSICAL_TYPES:
+            return ps.kind
         return ps.kind
     if ps.shape and len(ps.shape) == 1 and ps.shape[0] == 1:
         return ps.kind
@@ -41,9 +48,10 @@ def format_param_type(ps: ParamSpec) -> str:
 
 
 def _normalize_match_type(type_str: str) -> str:
-    if type_str in _CLASSICAL_TYPES:
-        return type_str
-    for kind in ("qbit", "bit", "qint", "bint", "qdec", "qfloat"):
+    base = type_base(type_str)
+    if base in CLASSICAL_TYPES:
+        return type_str if "[" in type_str else base
+    for kind in ("qbit", "bit", "qint", "quint", "bint", "qdec", "qudec", "qfloat", "qreal"):
         if type_str == kind or type_str == f"{kind}[1]":
             return kind
     return type_str
@@ -101,9 +109,9 @@ class FuncOverloadTable:
 def _normalize_type(type_str: str) -> str:
     if not type_str:
         return "var"
-    base = type_str.split("[", 1)[0]
-    if base in _CLASSICAL_TYPES:
-        return type_str if "[" in type_str and base in _CLASSICAL_TYPES else base
+    base = type_base(type_str)
+    if base in CLASSICAL_TYPES:
+        return type_str if "[" in type_str else base
     return type_str
 
 
@@ -148,11 +156,11 @@ def infer_expr_type(expr: Expr, symbols: Dict[str, object]) -> str:
     if isinstance(expr, BinaryExpr):
         left = infer_expr_type(expr.left, symbols)
         right = infer_expr_type(expr.right, symbols)
-        if left == right and left != "var":
+        if left == right and type_base(left) not in ("var", "qvar", "cvar"):
             return left
-        if left in _CLASSICAL_TYPES and left != "var":
+        if is_classical_type(left) and type_base(left) != "cvar":
             return left
-        if right in _CLASSICAL_TYPES and right != "var":
+        if is_classical_type(right) and type_base(right) != "cvar":
             return right
         return "var"
     if isinstance(expr, CallExpr) and expr.resolved_func is not None:
@@ -168,11 +176,10 @@ def _match_score(param_sig: ParamSig, arg_types: Sequence[str]) -> Optional[int]
     for param_type, arg_type in zip(param_sig, arg_types):
         param_type = _normalize_match_type(param_type)
         arg_type = _normalize_match_type(arg_type)
-        if param_type == "var":
-            continue
-        if param_type != arg_type:
+        part = wildcard_match_score(param_type, arg_type)
+        if part is None:
             return None
-        score += 1
+        score += part
     return score
 
 

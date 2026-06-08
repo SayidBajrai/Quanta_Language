@@ -64,8 +64,28 @@ class LetDecl(Stmt):
         self.value = value
 
 
+class ClassicalNumericDecl(Stmt):
+    """Classical numeric register: uint(bits), dec(int, frac), udec(int, frac)."""
+
+    def __init__(
+        self,
+        kind: str,
+        size: Optional[int],
+        name: str,
+        value: Optional[Expr] = None,
+        size2: Optional[int] = None,
+        tensor_type: Optional["TensorType"] = None,
+    ):
+        self.kind = kind
+        self.size = size
+        self.size2 = size2
+        self.name = name
+        self.value = value
+        self.tensor_type = tensor_type
+
+
 class QuantumDecl(Stmt):
-    """Quantum register declaration (qbit/bit/qint/bint/qdec/qfloat)"""
+    """Quantum register declaration (qbit, qint, quint, qdec, qreal, …)."""
     
     def __init__(
         self,
@@ -76,19 +96,25 @@ class QuantumDecl(Stmt):
         shape: Optional[List[Optional[int]]] = None,
         tensor_type: Optional["TensorType"] = None,
         size2: Optional[int] = None,
+        real_min: Optional[float] = None,
+        real_max: Optional[float] = None,
     ):
-        self.kind = kind  # "qbit", "bit", "qint", "bint", "qdec", or "qfloat"
+        self.kind = kind
         self.shape = shape if shape is not None else ([size] if size is not None else [1])
-        self.size2 = size2  # Second dimension for qdec[int_bits, frac_bits] and qfloat[ebits, mbits]
+        self.size2 = size2
         self.tensor_type = tensor_type
         self.name = name
-        self.value = value  # Initialization value (e.g., qint[3] x = 2)
+        self.value = value
+        self.real_min = real_min
+        self.real_max = real_max
 
         if size is not None:
             self.size = size
         else:
             self.size = (
-                self._product(self.shape) if self.shape and all(d is not None for d in self.shape) else 1
+                self._product(self.shape)
+                if self.shape and all(d is not None for d in self.shape)
+                else 1
             )
 
     @staticmethod
@@ -147,7 +173,7 @@ class FuncDecl(Stmt):
         self.return_type = return_type
         self.return_kind = return_kind
         self.return_size = return_size
-        self.param_specs = param_specs or [ParamSpec("qbit", p) for p in params]
+        self.param_specs = param_specs or [ParamSpec("qvar", p) for p in params]
         self.body = body
         self.doc = doc
 

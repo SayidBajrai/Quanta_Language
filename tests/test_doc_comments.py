@@ -162,8 +162,8 @@ func float add(float a, float b) {
 UNSPECIFIED_ADD_SOURCE = """
 /// - add function
 /// - adds two variables together
-/// var a - first variable
-/// var b - second variable
+/// cvar a - first variable
+/// cvar b - second variable
 /// return: var - result of add
 func var add(a, b) {
     return a + b;
@@ -183,7 +183,7 @@ def test_doc_comments_unspecified_param_and_return_types():
     doc = get_user_function_docs(UNSPECIFIED_ADD_SOURCE, "add")
     assert doc is not None
     assert doc.signature == "var add(a, b)"
-    assert doc.params[0].type == "var"
+    assert doc.params[0].type == "cvar"
     assert "result of add" in doc.returns
 
 

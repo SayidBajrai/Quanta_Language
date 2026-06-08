@@ -32,7 +32,14 @@ def tensor_type_from_decl(stmt: VarDecl) -> TensorType:
 def tensor_type_from_quantum(stmt: QuantumDecl) -> TensorType:
     if stmt.tensor_type is not None:
         return stmt.tensor_type
-    if stmt.kind in ("qdec", "qfloat") and stmt.size2 is not None:
+    if stmt.kind == "qreal":
+        return TensorType(
+            stmt.kind,
+            (stmt.size or 1,),
+            real_min=stmt.real_min,
+            real_max=stmt.real_max,
+        )
+    if stmt.kind in ("qdec", "qudec", "qfloat") and stmt.size2 is not None:
         return TensorType(stmt.kind, (stmt.size or 0, stmt.size2))
     if stmt.kind == "qfloat" and stmt.size is not None and stmt.size2 is None:
         return TensorType(stmt.kind, (stmt.size,))

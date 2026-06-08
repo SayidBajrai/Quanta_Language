@@ -9,6 +9,7 @@ __all__ = [
     "VarDecl",
     "ConstDecl",
     "LetDecl",
+    "ClassicalNumericDecl",
     "QuantumDecl",
     "ParamSpec",
     "FuncDecl",

@@ -35,10 +35,18 @@ class TokenType(Enum):
     STR = "STR"
     LIST = "LIST"
     DICT = "DICT"
+    QVAR = "QVAR"
+    CVAR = "CVAR"
     QINT = "QINT"
+    QUINT = "QUINT"
     BINT = "BINT"
     QDEC = "QDEC"
+    QUDEC = "QUDEC"
     QFLOAT = "QFLOAT"
+    QREAL = "QREAL"
+    UINT = "UINT"
+    DEC = "DEC"
+    UDEC = "UDEC"
     
     # Literals
     IDENT = "IDENT"
@@ -63,6 +71,8 @@ class TokenType(Enum):
     SLASH = "/"
     PERCENT = "%"
     DOT = "."
+    HADAMARD = "⊙"
+    KRON = "⊗"
     
     # Delimiters
     LBRACE = "{"
@@ -97,15 +107,23 @@ class Lexer:
         "func": TokenType.FUNC,
         "class": TokenType.CLASS,
         "var": TokenType.VAR,
+        "qvar": TokenType.QVAR,
+        "cvar": TokenType.CVAR,
         "const": TokenType.CONST,
         "let": TokenType.LET,
         "gate": TokenType.GATE,
         "qbit": TokenType.QBIT,
         "bit": TokenType.BIT,
         "qint": TokenType.QINT,
+        "quint": TokenType.QUINT,
         "bint": TokenType.BINT,
         "qdec": TokenType.QDEC,
+        "qudec": TokenType.QUDEC,
         "qfloat": TokenType.QFLOAT,
+        "qreal": TokenType.QREAL,
+        "uint": TokenType.UINT,
+        "dec": TokenType.DEC,
+        "udec": TokenType.UDEC,
         "for": TokenType.FOR,
         "while": TokenType.WHILE,
         "if": TokenType.IF,
@@ -196,6 +214,10 @@ class Lexer:
             if self._peek().isdigit():
                 return self._number(".")
             return self._make_token(TokenType.DOT, ".")
+        elif char == "⊙":
+            return self._make_token(TokenType.HADAMARD, "⊙")
+        elif char == "⊗":
+            return self._make_token(TokenType.KRON, "⊗")
         elif char == "%":
             return self._make_token(TokenType.PERCENT, "%")
         elif char == "=":

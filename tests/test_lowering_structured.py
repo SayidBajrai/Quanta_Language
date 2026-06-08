@@ -40,12 +40,12 @@ func bit[2] segment(qbit[2] anc, qbit psi) {
     return b
 }
 
-qbit input
+qbit qin
 qbit[2] ancilla
 bit[2] flags
 
-reset(input)
-H(input)
+reset(qin)
+H(qin)
 """
   qasm = compile_structured(source)
   assert "def segment__qbit2_qbit" in qasm
@@ -54,7 +54,7 @@ H(input)
   assert "reset anc;" in qasm or "reset(anc)" in source
   assert "measure anc -> b;" in qasm
   assert "return b;" in qasm
-  assert "qubit input;" in qasm
+  assert "qubit qin;" in qasm
 
 
 def test_structured_while_loop():
@@ -91,9 +91,9 @@ while (1) {
 
 def test_structured_preserves_qadd_as_gate():
   source = """
-qint[2] a
-qint[2] b
-qint[2] c
+quint(2) a
+quint(2) b
+quint(2) c
 QAdd(a, b, c)
 """
   qasm = compile_structured(source)
@@ -107,57 +107,57 @@ QAdd(a, b, c)
     [
         (
             "QAdd",
-            "qint[2] a\nqint[2] b\nqint[2] c\nQAdd(a, b, c)",
+            "quint(2) a\nquint(2) b\nquint(2) c\nQAdd(a, b, c)",
             "__QAdd_2_2_2",
         ),
         (
             "QSub",
-            "qint[2] a\nqint[2] b\nQSub(a, b)",
+            "quint(2) a\nquint(2) b\nQSub(a, b)",
             "__QSub_2_2",
         ),
         (
             "QMult",
-            "qint[2] a\nqint[2] b\nqint[4] out\nQMult(a, b, out)",
+            "quint(2) a\nquint(2) b\nquint(4) out\nQMult(a, b, out)",
             "__QMult_2_2_4",
         ),
         (
             "Compare",
-            "qint[2] a\nqint[2] b\nqbit flag\nCompare(a, b, flag)",
+            "quint(2) a\nquint(2) b\nqbit flag\nCompare(a, b, flag)",
             "__Compare_2_2_1",
         ),
         (
             "QDiv",
-            "qint[2] a\nqint[2] b\nqint[2] q\nqint[2] r\nQDiv(a, b, q, r)",
+            "quint(2) a\nquint(2) b\nquint(2) q\nquint(2) r\nQDiv(a, b, q, r)",
             "__QDiv_2_2_2_2",
         ),
         (
             "QMod",
-            "qint[2] a\nqint[2] b\nqint[2] c\nQMod(a, b, c)",
+            "quint(2) a\nquint(2) b\nquint(2) c\nQMod(a, b, c)",
             "__QMod_2_2_2",
         ),
         (
             "QFTAdd",
-            "qint[2] a\nqint[2] b\nqint[2] c\nQFTAdd(a, b, c)",
+            "quint(2) a\nquint(2) b\nquint(2) c\nQFTAdd(a, b, c)",
             "__QFTAdd_2_2_2",
         ),
         (
             "QTreeAdd",
-            "qint[2] a\nqint[2] b\nqint[2] c\nQTreeAdd(a, b, c)",
+            "quint(2) a\nquint(2) b\nquint(2) c\nQTreeAdd(a, b, c)",
             "__QTreeAdd_2_2_2",
         ),
         (
             "QExpEncMult",
-            "qint[2] a\nqint[2] b\nqint[4] out\nQExpEncMult(a, b, out)",
+            "quint(2) a\nquint(2) b\nquint(4) out\nQExpEncMult(a, b, out)",
             "__QExpEncMult_2_2_4",
         ),
         (
             "QTreeMult",
-            "qint[2] a\nqint[2] b\nqint[4] out\nQTreeMult(a, b, out)",
+            "quint(2) a\nquint(2) b\nquint(4) out\nQTreeMult(a, b, out)",
             "__QTreeMult_2_2_4",
         ),
         (
             "Grover",
-            "qint[2] a\nGrover(a, 3)",
+            "quint(2) a\nGrover(a, 3)",
             "__Grover_2_3",
         ),
     ],

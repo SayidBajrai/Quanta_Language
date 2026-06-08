@@ -89,11 +89,11 @@ Print(q)
 
 def test_qint_print_and_fstring_match():
     source_direct = """
-qint[3] a = 5
+quint(3) a = 5
 Print(a)
 """
     source_f = """
-qint[3] a = 5
+quint(3) a = 5
 Print(f"{a}")
 """
     assert get_prints(source_direct) == get_prints(source_f)
@@ -123,10 +123,10 @@ Print(f"Value = {b}")
 
 def test_fstring_value_prefix_qint():
     source = """
-qint[3] a = 5
+quint(3) a = 5
 Print(f"Value = {a}")
 """
-    inner = get_prints("qint[3] a = 5\nPrint(a)")
+    inner = get_prints("quint(3) a = 5\nPrint(a)")
     assert get_prints(source) == f"Value = {inner}"
 
 

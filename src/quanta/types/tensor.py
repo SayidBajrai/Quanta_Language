@@ -2,7 +2,7 @@
 N-dimensional tensor type utilities for Quanta.
 
 All primitive types (qbit, bit, int, float, bool, str) can be scalars or tensors
-with static or dynamic shapes.
+with static or dynamic shapes. Numeric types use ``kind(params)`` syntax.
 """
 
 from __future__ import annotations
@@ -12,8 +12,20 @@ from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence, Union
 
 from ..errors import QuantaSemanticError, QuantaTypeError
+from .numeric import (
+    NUMERIC_KINDS,
+    apply_numeric_defaults,
+    format_numeric_type,
+    parse_numeric_type,
+)
 
-SCALAR_BASE_TYPES = frozenset({"qbit", "bit", "qint", "bint", "int", "float", "bool", "str", "list", "dict", "var"})
+SCALAR_BASE_TYPES = frozenset(
+    {
+        "qbit", "bit", "qint", "quint", "bint", "qdec", "qudec", "qfloat", "qreal",
+        "uint", "dec", "udec",
+        "int", "float", "bool", "str", "list", "dict", "var",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -22,6 +34,8 @@ class TensorType:
 
     base: str
     dimensions: tuple  # tuple[Optional[int], ...]
+    real_min: Optional[float] = None
+    real_max: Optional[float] = None
 
     @property
     def rank(self) -> int:
@@ -45,6 +59,12 @@ class TensorType:
             return 1
         if self.is_dynamic:
             return None
+        if self.base == "qreal":
+            return self.dimensions[0] if self.dimensions else 1
+        if self.base in ("qdec", "qudec", "dec", "udec") and len(self.dimensions) >= 2:
+            return self.dimensions[0] + self.dimensions[1]  # type: ignore[operator]
+        if self.base == "qfloat" and len(self.dimensions) >= 2:
+            return 1 + self.dimensions[0] + self.dimensions[1]  # type: ignore[operator]
         return math.prod(self.dimensions)
 
     def with_shape(self, shape: Sequence[int]) -> "TensorType":
@@ -52,9 +72,23 @@ class TensorType:
             raise QuantaTypeError(
                 f"Shape length {len(shape)} does not match tensor rank {self.rank}"
             )
-        return TensorType(self.base, tuple(shape))
+        return TensorType(self.base, tuple(shape), self.real_min, self.real_max)
 
     def format(self) -> str:
+        if self.base in NUMERIC_KINDS:
+            if self.base == "qreal":
+                bits = self.dimensions[0] if self.dimensions else 1
+                return format_numeric_type(
+                    "qreal", bits, real_min=self.real_min, real_max=self.real_max
+                )
+            if self.base in ("qdec", "qudec", "dec", "udec") and len(self.dimensions) >= 2:
+                return format_numeric_type(self.base, self.dimensions[0], self.dimensions[1])
+            if self.dimensions:
+                dim = self.dimensions[0]
+                if dim is None:
+                    return f"{self.base}()"
+                return format_numeric_type(self.base, dim)
+            return self.base
         if self.is_scalar:
             return self.base
         parts = []
@@ -66,9 +100,40 @@ class TensorType:
     def parse_legacy(type_hint: Optional[str]) -> "TensorType":
         if not type_hint:
             return TensorType("var", ())
+        parsed = parse_numeric_type(type_hint)
+        if parsed:
+            kind = parsed["kind"]
+            if kind == "qreal":
+                return TensorType(
+                    kind,
+                    (parsed["size"],),
+                    real_min=parsed.get("real_min"),
+                    real_max=parsed.get("real_max"),
+                )
+            if "size2" in parsed:
+                return TensorType(kind, (parsed["size"], parsed["size2"]))
+            if parsed.get("size") is None:
+                return TensorType(kind, (None,))
+            return TensorType(kind, (parsed["size"],))
         if "[" not in type_hint:
+            if type_hint in NUMERIC_KINDS:
+                normalized = apply_numeric_defaults(type_hint)
+                if type_hint == "qreal":
+                    return TensorType(
+                        type_hint,
+                        (normalized["size"],),
+                        real_min=normalized["real_min"],
+                        real_max=normalized["real_max"],
+                    )
+                if type_hint in ("qdec", "qudec", "dec", "udec", "qfloat"):
+                    return TensorType(type_hint, (normalized["size"], normalized["size2"]))
+                return TensorType(type_hint, (normalized["size"],))
             return TensorType(type_hint, ())
         base = type_hint.split("[", 1)[0]
+        if base in NUMERIC_KINDS:
+            raise QuantaTypeError(
+                f"{base} uses parenthesis syntax, e.g. {base}(8); bracket syntax is not supported"
+            )
         rest = type_hint[len(base) :]
         dims: List[Optional[int]] = []
         while rest.startswith("["):
@@ -89,9 +154,9 @@ class TensorType:
         return TensorType(base, tuple(dims))
 
     @staticmethod
-    def from_quantum(kind: str, shape: Sequence[Optional[int]]) -> "TensorType":
+    def from_quantum(kind: str, shape: Sequence[Optional[int]], **kwargs) -> "TensorType":
         dims = tuple(shape) if shape else (1,)
-        return TensorType(kind, dims)
+        return TensorType(kind, dims, kwargs.get("real_min"), kwargs.get("real_max"))
 
 
 def infer_shape(value: Any) -> List[int]:
@@ -125,7 +190,7 @@ def validate_shape(value: Any, expected: Sequence[Optional[int]], path: str = ""
 
 
 def tensor_default_value(base: str) -> Any:
-    if base in ("int", "float", "qint", "bint"):
+    if base in ("int", "float", "qint", "quint", "bint", "uint", "dec", "udec"):
         return 0
     if base == "bool":
         return False
@@ -133,7 +198,7 @@ def tensor_default_value(base: str) -> Any:
         return ""
     if base in ("bit",):
         return 0
-    if base in ("qbit",):
+    if base in ("qbit", "qreal"):
         return None
     return None
 

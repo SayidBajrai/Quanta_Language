@@ -1,5 +1,62 @@
 """Quanta type system."""
 
+from .numeric import (
+    DEFAULT_FIXED_FRAC_BITS,
+    DEFAULT_FIXED_INT_BITS,
+    DEFAULT_INT_BITS,
+    DEFAULT_QREAL_MAX,
+    DEFAULT_QREAL_MIN,
+    DEFAULT_QREAL_QBITS,
+    apply_numeric_defaults,
+    basis_index_to_signed_value,
+    build_tensor_type,
+    decode_qdec_value,
+    dynamic_numeric_params,
+    finalize_numeric_params,
+    flat_qubit_count,
+    format_numeric_type,
+    init_bit_pattern,
+    is_uniform_superposition,
+    parse_numeric_type,
+    qint_signed_range,
+    qdec_signed_range,
+    qdec_step,
+    qreal_num_states,
+    qreal_value_at,
+    twos_complement_decode,
+    twos_complement_encode,
+)
+from .kinds import (
+    CLASSICAL_RETURN_TYPES,
+    CLASSICAL_TYPES,
+    QUANTUM_TYPES,
+    WILDCARD_TYPES,
+    is_classical_return_type,
+    is_classical_type,
+    is_quantum_type,
+    is_wildcard_type,
+    param_symbol_type,
+    qasm_param_type,
+    type_base,
+    wildcard_match_score,
+)
 from .tensor import TensorType, infer_shape, validate_shape, tensor_default_value
 
-__all__ = ["TensorType", "infer_shape", "validate_shape", "tensor_default_value"]
+__all__ = [
+    "TensorType",
+    "infer_shape",
+    "validate_shape",
+    "tensor_default_value",
+    "CLASSICAL_RETURN_TYPES",
+    "CLASSICAL_TYPES",
+    "QUANTUM_TYPES",
+    "WILDCARD_TYPES",
+    "is_classical_return_type",
+    "is_classical_type",
+    "is_quantum_type",
+    "is_wildcard_type",
+    "param_symbol_type",
+    "qasm_param_type",
+    "type_base",
+    "wildcard_match_score",
+]

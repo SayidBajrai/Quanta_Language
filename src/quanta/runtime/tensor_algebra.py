@@ -214,3 +214,15 @@ def tensor_elementwise_binop(left: Any, right: Any, op: str) -> Any:
     if op == "/":
         return _coerce_scalar(to_numeric_scalar(left) / to_numeric_scalar(right), kind)
     raise QuantaSemanticError(f"Unsupported tensor operation: {op}")
+
+
+def tensor_star_product(left: Any, right: Any) -> Any:
+    """* on tensors: cross product for two 3D vectors; scalar scale otherwise."""
+    if isinstance(left, list) and isinstance(right, list):
+        if tensor_shape(left) == (3,) and tensor_shape(right) == (3,):
+            return cross_product(left, right)
+        raise QuantaSemanticError(
+            "Operator * on tensors is the cross product for 3D vectors only; "
+            "use ⊙ for elementwise product or ⊗ for Kronecker product"
+        )
+    return tensor_elementwise_binop(left, right, "*")

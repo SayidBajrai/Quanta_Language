@@ -104,14 +104,14 @@ measure q[1] -> c[1];
 
 ## Language Features
 
-- **Types**: `int`, `float`, `bool`, `str`, `list`, `dict`, `qbit`, `bit`, `qint[n]` / `qint[]`, `bint[n]`, `qdec[int_bits, frac_bits]`, `qfloat[ebits, mbits]`
+- **Types**: classical `int`, `float`, `bool`, `str`, `list`, `dict`, `uint(n)`, `dec(i,f)`, `udec(i,f)`; quantum `qbit[n]`, `bit[n]`, `qint(n)`, `quint(n)`, `qdec(i,f)`, `qudec(i,f)`, `qfloat(e,m)`, `qreal(min,max,bits)`, `bint[n]`
 - **Gate Macros**: `gate` keyword for compile-time circuit composition
 - **Modifiers**: `ctrl` and `inv` (dagger) modifiers for gates, and `reset` for qubits
 - **Functions**: Compile-time inlined for quantum operations
 - **Control Flow**: `for` loops (unrolled), `while` loops (structured mode), `if/else` (classical only)
 - **Indexing**: Multi-dimensional fancy indexing (`q[0,2,5]`, `q[0:4,7]`)
 - **Tensor Types**: N-dimensional classical and quantum tensors (`int[n][m]`, `float[3][3]`, `qbit[2][2]`)
-- **Tensor Algebra**: `DotProduct`, `CrossProduct`, `ElementwiseProduct`, `TensorProduct`, `Shape`, `Reshape`; dot operator `a . b` (frontend / classical only)
+- **Tensor Algebra**: `DotProduct`, `CrossProduct`, `ElementwiseProduct`, `TensorProduct`, `Shape`, `Reshape`; operators `a . b` (dot), `A * B` (cross, 3D vectors), `A ⊙ B` (elementwise), `A ⊗ B` (Kronecker) — frontend / classical only
 - **Structured Compilation**: `compile(source, keep_structure=True)` preserves `def`/`gate` and control flow
 - **Print Formatting**: f-string specifiers for symbolic states, probabilities, entropy, amplitudes, summary, Bloch vectors, circuit trace
 - **String escapes**: C-style `\n`, `\r`, `\t`, `\\`, `\"`, hex/Unicode escapes in string and f-string literals
@@ -119,7 +119,7 @@ measure q[1] -> c[1];
 - **Metrics**: `Fidelity()` builtin (frontend simulation only)
 - **Gate Set**: `H`, `X`, `CNot`, `CZ`, `Swap`, `RZ`, `Measure`, and more
 - **High-Level Gates**: `Bell`, `GHZ`, `WState`, `SwapGate`, `QFT`, `InverseQFT`
-- **Quantum Arithmetic**: `QAdd`, `QMult`, `Compare`, `Grover`; operator overloading (`+`, `-`, `*`, `/`, `%`) on `qint`; `qint[]` size inference; classical constants in expressions; fixed-point (`qdec`) and floating-point (`qfloat`) registers
+- **Quantum Arithmetic**: `QAdd`, `QMult`, `Compare`, `Grover`; operator overloading (`+`, `-`, `*`, `/`, `%`) on `quint`/`qint`; `quint()` size inference; signed `qint`/`qdec`; interval `qreal`; classical `uint`/`dec`/`udec`
 - **Standard Library**: `Print()`, `Len()`, `Measure()`, `Assert()`, `Range()`
 - **Constants**: Built-in `pi`, `e`, and user-defined `const` declarations
 - **API**: `compile(source, keep_structure=False)`, `run(source, shots=...)`, `get_prints(source)` (frontend debug, simulator only)
@@ -153,6 +153,15 @@ measure q[1] -> c[1];
 
 ```text
 int, float, bool, str, list, dict
+uint(bits)
+dec(int_bits, frac_bits)
+udec(int_bits, frac_bits)
+```
+
+```quanta
+uint(8) counter
+dec(16, 16) fixed
+udec(8, 8) ufixed
 ```
 
 - `var` is the default inferred type
@@ -160,32 +169,49 @@ int, float, bool, str, list, dict
 
 #### Quantum Types (QASM-Mapped)
 
+**Tensor registers** (bracket syntax for arrays):
+
 ```text
-qbit
-bit
-qbit[n]
-bit[n]
-qint[n]    // Quantum integer (N qubits)
-bint[n]    // Classical bit integer (N classical bits)
-qdec[int_bits, frac_bits]   // Quantum fixed-point (int_bits + frac_bits qubits)
-qfloat[ebits, mbits]        // Quantum floating-point (1 + ebits + mbits qubits, IEEE-754-like)
+qbit[n], bit[n], bint[n]
+```
+
+**Numeric registers** (parenthesis syntax — not arrays):
+
+```text
+qint(bits)              // signed quantum integer (two's complement), range [-2^(n-1), 2^(n-1)-1]
+quint(bits)             // unsigned quantum integer (legacy semantics), range [0, 2^n-1]
+qdec(int_bits, frac_bits)    // signed fixed-point quantum decimal (two's complement)
+qudec(int_bits, frac_bits)   // unsigned fixed-point (legacy semantics)
+qfloat(ebits, mbits)         // quantum float (1 + e + m qubits)
+qreal(min, max, qbits)       // uniform interval encoding (not IEEE float)
 ```
 
 📌 **Rules**
 
-- These map **1:1** to OpenQASM 3 registers 
-- No dynamic allocation
-- `qint[n]` represents N qubits interpreted as an integer (0 to 2^n-1)
-- `bint[n]` represents N classical bits (0 to 2^n-1)
+- Numeric types use `()` to avoid confusion with tensor indexing (`[]` is for `qbit[2][2]` etc.)
+- **Parameterless declarations** infer canonical defaults (stored explicitly in the AST):
+
+| Bare form | Normalized to |
+|-----------|---------------|
+| `qint`, `quint`, `uint` | `*(32)` |
+| `qdec`, `qudec`, `dec`, `udec` | `*(16,16)` |
+| `qreal` | `qreal(-1, 1, 32)` |
+| `qreal(lo, hi)` | `qreal(lo, hi, 32)` |
+
+- `quint()` / `qint()` with empty `()` still means **dynamic width inference** from operands (not the 32-bit default)
+- Bracket syntax on numeric types is rejected (`qint[4]` → error; use `qint(4)` or bare `qint`)
+- All quantum numeric types lower to `qubit[n]` in OpenQASM 3
+- `H(register)` applies Hadamard to each underlying qubit → uniform superposition over basis states
+- Signed types (`qint`, `qdec`) use two's complement internally (single zero, uniform semantic coverage)
 
 ### Variables
 
 #### Declaration
 
 ```quanta
-var x = 10
-int y = 3
-float z = 1.23
+var count = 10
+int rows = 3
+float rate = 1.23
 ```
 
 - `var` → inferred, immutable type after assignment
@@ -202,6 +228,27 @@ let theta = pi / 4
 |---|---|
 |`const`|Compile-time literal|
 |`let`|Immutable value, resolved once|
+
+#### Reserved names (OpenQASM)
+
+User-defined names must **not** collide with OpenQASM 3 keywords or standard gate names, because registers and parameters are emitted verbatim into `.qasm` output. A register named `x` would produce invalid lines like `x x;` (gate and operand share the same identifier).
+
+The compiler rejects conflicting names at semantic analysis with a clear error.
+
+| Blocked | Examples |
+|---------|----------|
+| Standard gates | `h`, `x`, `y`, `z`, `cx`, `cz`, `swap`, `rx`, `ry`, `rz`, `s`, `t`, `ccx`, `measure`, `reset`, … |
+| OpenQASM keywords | `def`, `gate`, `qubit`, `bit`, `input`, `output`, `const`, `include`, … |
+
+Matching is **case-insensitive** (`x`, `X`, and `h`, `H` are all reserved).
+
+Applies to **quantum register names** (`qbit`, `bit`, `qint`, …), **gate macros**, **functions**, and their **parameters** — anything emitted into OpenQASM. Pure classical names (`int`, `float`, `var`, …) are not restricted.
+
+```quanta
+qbit x        // error: conflicts with OpenQASM gate 'x'
+qbit q        // ok
+H(q)
+```
 
 ### Strings
 
@@ -293,7 +340,7 @@ gates["control"]
 Declare N-dimensional classical tensors with repeated `[n]` dimensions:
 
 ```quanta
-float[3] x = [1.0, 2.0, 3.0]
+float[3] vec = [1.0, 2.0, 3.0]
 float[3][3] W = [[0.2, 0.4, 0.6], [0.1, 0.3, 0.5], [0.7, 0.8, 0.9]]
 ```
 
@@ -309,22 +356,25 @@ W[:, 1]       // column vector
 
 | Operation | Syntax | Requirement | Result |
 |-----------|--------|-------------|--------|
-| Dot product | `a . b` or `DotProduct(a, b)` | Rank-1 vectors, equal length | Scalar |
-| Cross product | `CrossProduct(a, b)` | Two 3D vectors | 3-vector |
-| Elementwise (Hadamard) | `ElementwiseProduct(a, b)` or `A * B` on tensors | Identical shape | Same shape |
-| Tensor (Kronecker) product | `TensorProduct(a, b)` | Compatible tensors | Block-expanded tensor |
+| Dot product | `DotProduct(a, b)` or `a . b` | Rank-1 vectors, equal length | Scalar |
+| Cross product | `CrossProduct(a, b)`  or `A * B` | Two 3D vectors | 3-vector |
+| Elementwise (Hadamard) | `ElementwiseProduct(a, b)` or `A ⊙ B` on tensors | Identical shape | Same shape |
+| Tensor (Kronecker) product | `TensorProduct(a, b)` or `A ⊗ B` | Compatible tensors | Block-expanded tensor |
 
 ```quanta
 float[3] a = [1.0, 2.0, 3.0]
 float[3] b = [4.0, 5.0, 6.0]
 float dot_ab = a . b                    // 32.0
+float[3] cross_ab = a * b               // cross product (3D vectors)
 
-float[3] x = [1, 0, 1]
-float y0 = DotProduct(W[0, :], x)       // row–vector dot product
+float[3][3] W = [[0.2, 0.4, 0.6], [0.1, 0.3, 0.5], [0.7, 0.8, 0.9]]
+float[3] vec = [1, 0, 1]
+float y0 = DotProduct(W[0, :], vec)     // row–vector dot product
 
 float[2][2] A = [[1, 2], [3, 4]]
 float[2][2] B = [[0, 5], [6, 7]]
-float[4][4] kron = TensorProduct(A, B)
+float[2][2] hadamard = A ⊙ B             // elementwise
+float[4][4] kron = A ⊗ B                // Kronecker
 Print(Shape(kron))                      // (4, 4)
 ```
 
@@ -351,7 +401,7 @@ func apply_h(q) {
 }
 ```
 
-Untyped parameters on quantum functions default to `qbit`.
+Untyped parameters on quantum functions default to `qvar` (any quantum type).
 
 #### Return Types
 
@@ -381,9 +431,12 @@ func var mul(a, b) {
 
 | Syntax | Meaning |
 |--------|---------|
-| `a, b` | Unspecified (classical functions default to untyped/`var`) |
+| `a, b` | Unspecified — defaults to `cvar` on classical functions, `qvar` on quantum subroutines |
 | `float a, float b` | Explicit classical types |
 | `qbit a, qbit b` | Explicit quantum types (for mixed or quantum functions) |
+| `var x` | Any type (classical or quantum) |
+| `qvar q` | Any quantum type (`qbit`, `qint`, `qdec`, …) |
+| `cvar x` | Any classical type (`int`, `float`, `str`, …) |
 
 You can mix specified and unspecified parameters and return types:
 
@@ -392,8 +445,8 @@ func int add(a, b) {          // typed return, unspecified params
     return a + b
 }
 
-func var scale(float x, factor) {   // inferred return, one typed param
-    return x * factor
+func var scale(float val, factor) {   // inferred return, one typed param
+    return val * factor
 }
 ```
 
@@ -434,11 +487,19 @@ func float add(float a, float b) {
     return a + b;
 }
 
-int x = add(1, 2)        // resolves to int add(int, int)
-float y = add(1.5, 2.5)  // resolves to float add(float, float)
+int i = add(1, 2)        // resolves to int add(int, int)
+float f = add(1.5, 2.5)  // resolves to float add(float, float)
 ```
 
-Unspecified parameter types (`var`) match any argument type but lose to more specific overloads when both fit.
+Wildcard parameter types match by category and lose to more specific overloads when both fit:
+
+| Wildcard | Matches | Default when omitted on |
+|----------|---------|-------------------------|
+| `var` | any type | — (write explicitly) |
+| `qvar` | any quantum type | quantum subroutines (`func name(...)`) |
+| `cvar` | any classical type | classical / typed-return functions |
+
+Specificity order: concrete type > `qvar` / `cvar` > `var`.
 
 Structured OpenQASM output (`compile(..., keep_structure=True)`) emits mangled `def` names internally (e.g. `add__int_int`) so each overload lowers to a distinct definition.
 
@@ -452,7 +513,7 @@ Place consecutive `///` lines immediately before a `func` or `gate` declaration.
 | 2 | Type + identifier before `-` | `[Type] [Identifier] - [Description]` |
 | 3 | Everything else | Summary prose (optional `-` bullet) |
 
-Use concrete types in docs when the declaration specifies them; use `var` when types are left unspecified.
+Use concrete types in docs when the declaration specifies them; use `cvar`, `qvar`, or `var` when a wildcard is written or implied by omission.
 
 **Specified param and return types:**
 
@@ -472,8 +533,8 @@ func float add(float a, float b) {
 ```quanta
 /// - add function
 /// - adds two variables together
-/// var a - first variable
-/// var b - second variable
+/// cvar a - first variable
+/// cvar b - second variable
 /// return: var - result of add
 func var add(a, b) {
     return a + b;
@@ -504,26 +565,33 @@ hover = doc.format_hover()                    # IDE tooltip text
 doc = get_function_docs("add", source=source)
 ```
 
-### Quantum Integer Types (`qint` and `bint`)
+### Quantum Integer Types
 
-#### `qint[N]` - Quantum Integer
-
-A `qint[N]` represents **N qubits interpreted as an integer** in the computational basis:
+#### `qint(n)` — signed quantum integer (two's complement)
 
 ```quanta
-qint[3] x = 2    // Initialize to |010⟩
-qint[4] y        // Uninitialized (|0000⟩)
+qint(4) a = -1    // signed range [-8, 7]
+H(a)              // uniform over all 16 basis states → uniform signed semantics
 ```
 
-**Properties:**
-- Storage: N qubits
-- Domain: 0 to 2^N - 1
-- Nature: Quantum (superposition allowed)
-- Copying: ❌ Forbidden
-- Measurement: Explicit only
-- Arithmetic: Reversible, unitary
+- **Storage**: n qubits
+- **Domain**: `[-2^(n-1), 2^(n-1) - 1]` via two's complement
+- **Uniformity**: `H(qint)` is uniform over every representable signed value (one basis state per value)
 
-#### `bint[N]` - Classical Bit Integer
+#### `quint(n)` — unsigned quantum integer (legacy)
+
+Preserves the original unsigned `qint[n]` behavior:
+
+```quanta
+quint(3) a = 2    // |010⟩, domain [0, 7]
+quint() z = a + b // dynamic width inference from operands
+```
+
+- **Storage**: n qubits
+- **Domain**: 0 to 2^n - 1
+- **Arithmetic**: `QAdd`/`QMult`/operator overloading target `quint` by default
+
+#### `bint[n]` — classical bit integer
 
 A `bint[N]` represents **N classical bits**, equivalent to an unsigned integer:
 
@@ -542,46 +610,36 @@ bint[3] c = 2    // Classical integer
 #### Initialization
 
 ```quanta
-qint[3] x = 2    // Initialize qubits to encode value 2
+quint(3) a = 2    // Initialize qubits to encode value 2
 bint[3] c = 2    // Classical assignment
 ```
 
-For `qint`, initialization:
-1. Sets all qubits to |0⟩
-2. Applies NOT (X) gates to encode the binary value
+Initialization sets |0…0⟩ then applies X gates from the encoded bit pattern (unsigned magnitude or two's complement for signed types).
 
-**Example:**
-```quanta
-qint[3] q = 2    // Binary: 010, so |010⟩
-```
+### Quantum Fixed-Point, Float, and Real (`qdec`, `qudec`, `qfloat`, `qreal`)
 
-Generates:
-```qasm
-qbit[3] q;
-x q[1];          // Set bit 1 (second bit) to |1⟩
-```
-
-The value `2` in binary is `010` (bits from LSB to MSB: 0, 1, 0), so only `q[1]` is set to |1⟩.
-
-### Quantum Fixed-Point and Floating-Point (`qdec` and `qfloat`)
-
-#### `qdec[int_bits, frac_bits]` — Quantum fixed-point decimal
-
-Represents a real number with a **fixed binary point** (like classical fixed-point in DSP/embedded systems):
+#### `qdec(i, f)` — signed fixed-point (two's complement)
 
 ```quanta
-qdec[16, 8] x
+qdec(4, 4) fp
+H(fp)   // uniform over evenly spaced values in [-8.0, 7.9375] step 1/2^f
 ```
 
-- **Storage**: `int_bits + frac_bits` qubits (scaled integer: `value = raw_integer / 2^frac_bits`).
-- **Use when**: Bounded numeric computations, filter coefficients, controlled rotations, ML weights in a known range; reversible arithmetic is simpler and cheaper than floating-point.
+#### `qudec(i, f)` — unsigned fixed-point (legacy)
 
-#### `qfloat[ebits, mbits]` — Quantum floating-point (IEEE-754–like)
+```quanta
+qudec(16, 8) fp
+```
+
+- **Storage**: `int_bits + frac_bits` qubits
+- **Legacy unsigned** semantics (former `qdec[...]`)
+
+#### `qfloat(e, m)` — quantum floating-point (IEEE-754–like)
 
 Quantum analogue of IEEE-754:
 
 ```quanta
-qfloat[8, 23] x   // 32-bit style: 1 sign + 8 exponent + 23 mantissa
+qfloat(8,23) fp   // 32-bit style: 1 sign + 8 exponent + 23 mantissa
 ```
 
 - **Storage**: `1 + ebits + mbits` qubits (sign, exponent, mantissa; `value = (-1)^sign × (1 + fraction/2^mbits) × 2^(exponent - bias)`).
@@ -592,13 +650,23 @@ qfloat[8, 23] x   // 32-bit style: 1 sign + 8 exponent + 23 mantissa
 
 | Use case | Prefer |
 |----------|--------|
-| Bounded numerics (coefficients, rotations, thresholds) | `qdec[int_bits, frac_bits]` |
-| Physics simulations across wide scales | `qfloat[ebits, mbits]` |
-| ML weights in [–1, 1] or known range | `qdec[...]` |
-| Real IEEE semantics (NaN, infinities, subnormals) | `qfloat[...]` |
-| Hardware-efficient arithmetic, minimal ancilla | `qdec[...]` |
+| Bounded signed numerics | `qdec(i,f)` |
+| Legacy unsigned fixed-point | `qudec(i,f)` |
+| Wide dynamic range (IEEE-like) | `qfloat(e,m)` |
+| Continuous interval / variational params | `qreal(min,max,bits)` |
 
-Both types lower to plain `qbit[n]` in OpenQASM 3; arithmetic and interpretation are left to libraries or future extensions.
+#### `qreal(min, max, qbits)` — interval quantum real
+
+Maps `N = 2^qbits` basis states uniformly across `[min, max]`:
+
+```quanta
+qreal(-pi, pi, 16) theta
+qreal(0, 1, 8) alpha
+```
+
+`x_k = min + (k / (N-1)) * (max - min)` — **not** IEEE floating point. Ideal for rotations, QML parameters, and optimization landscapes.
+
+All quantum numeric types lower to `qubit[n]` in OpenQASM 3 with metadata describing semantic decoding.
 
 ### Quantum Arithmetic Operations
 
@@ -607,9 +675,9 @@ Both types lower to plain `qbit[n]` in OpenQASM 3; arithmetic and interpretation
 Variadic quantum addition operation:
 
 ```quanta
-qint[3] a = 1
-qint[3] b = 3
-qint[3] c
+quint(3) a = 1
+quint(3) b = 3
+quint(3) c
 QAdd(a, b, c)           // c = a + b (mod 2^3)
 QAdd(a, b, d, result)   // result = a + b + d (mod 2^N)
 ```
@@ -637,9 +705,9 @@ QAdd(a, b, d, result)   // result = a + b + d (mod 2^N)
 Variadic quantum multiplication operation:
 
 ```quanta
-qint[3] a = 2
-qint[3] b = 3
-qint[5] out              // Output must be wider
+quint(3) a = 2
+quint(3) b = 3
+quint(5) out              // Output must be wider
 QMult(a, b, out)         // out = a * b
 QMult(a, b, c, out)      // out = a * b * c
 ```
@@ -679,9 +747,9 @@ For `A = 3` (011) and `B = 5` (101):
 Variadic quantum addition using Quantum Fourier Transform (QFT):
 
 ```quanta
-qint[3] a = 1
-qint[3] b = 3
-qint[3] c
+quint(3) a = 1
+quint(3) b = 3
+quint(3) c
 QFTAdd(a, b, c)           // c = a + b (mod 2^3) using QFT
 QFTAdd(a, b, d, result)   // result = a + b + d (mod 2^N)
 ```
@@ -714,9 +782,9 @@ QFTAdd(a, b, d, result)   // result = a + b + d (mod 2^N)
 Variadic quantum addition using tree-based carry-save structure:
 
 ```quanta
-qint[3] a = 1
-qint[3] b = 3
-qint[3] c
+quint(3) a = 1
+quint(3) b = 3
+quint(3) c
 QTreeAdd(a, b, c)           // c = a + b (mod 2^3) using tree adder
 QTreeAdd(a, b, d, result)   // result = a + b + d (mod 2^N)
 ```
@@ -749,9 +817,9 @@ QTreeAdd(a, b, d, result)   // result = a + b + d (mod 2^N)
 Variadic quantum multiplication using exponent encoding:
 
 ```quanta
-qint[3] a = 2
-qint[3] b = 3
-qint[5] out
+quint(3) a = 2
+quint(3) b = 3
+quint(5) out
 QExpEncMult(a, b, out)         // out = a * b using exponent encoding
 QExpEncMult(a, b, c, out)      // out = a * b * c
 ```
@@ -786,9 +854,9 @@ QExpEncMult(a, b, c, out)      // out = a * b * c
 Variadic quantum multiplication using tree-based partial product reduction:
 
 ```quanta
-qint[3] a = 2
-qint[3] b = 3
-qint[5] out
+quint(3) a = 2
+quint(3) b = 3
+quint(5) out
 QTreeMult(a, b, out)         // out = a * b using tree multiplier
 QTreeMult(a, b, c, out)      // out = a * b * c
 ```
@@ -823,9 +891,9 @@ QTreeMult(a, b, c, out)      // out = a * b * c
 Variadic quantum subtraction using ripple-borrow subtractor:
 
 ```quanta
-qint[3] a = 5
-qint[3] b = 3
-qint[3] c
+quint(3) a = 5
+quint(3) b = 3
+quint(3) c
 QSub(a, b, c)           // c = a - b (mod 2^3)
 QSub(a, b, d, result)   // result = a - b - d (mod 2^N)
 ```
@@ -860,10 +928,10 @@ QSub(a, b, d, result)   // result = a - b - d (mod 2^N)
 Quantum integer division with remainder:
 
 ```quanta
-qint[4] dividend = 7
-qint[4] divisor = 3
-qint[4] quotient
-qint[4] remainder
+quint(4) dividend = 7
+quint(4) divisor = 3
+quint(4) quotient
+quint(4) remainder
 QDiv(dividend, divisor, quotient, remainder)  // 7 ÷ 3 = 2 R 1
 ```
 
@@ -902,13 +970,13 @@ QDiv(dividend, divisor, quotient, remainder)  // 7 ÷ 3 = 2 R 1
 Variadic quantum modulus operation:
 
 ```quanta
-qint[4] a = 7
-qint[4] b = 3
-qint[4] r
+quint(4) a = 7
+quint(4) b = 3
+quint(4) r
 QMod(a, b, r)           // r = a mod b = 1
 
 // With multiple divisors:
-qint[4] a, b, c, result
+quint(4) a, b, c, result
 QMod(a, b, c, result)   // result = a mod b mod c
 ```
 
@@ -966,38 +1034,38 @@ QMod(a, b, c, result)   // result = a mod b mod c
 Quanta supports operator overloading for `+`, `-`, `*`, `/`, and `%` on `qint` types. By default, these operators use `QAdd`, `QSub`, `QMult`, `QDiv`, and `QMod` respectively:
 
 ```quanta
-qint[3] a = 1
-qint[3] b = 3
-qint[3] c = a + b        // Sugar for: qint[3] c; QAdd(a, b, c)
-qint[3] d = a - b        // Sugar for: qint[3] d; QSub(a, b, d)
+quint(3) a = 1
+quint(3) b = 3
+quint(3) c = a + b        // Sugar for: quint(3) c; QAdd(a, b, c)
+quint(3) d = a - b        // Sugar for: quint(3) d; QSub(a, b, d)
 
-qint[4] x = 2
-qint[4] y = 3
-qint[4] z = 4
-qint[4] total = x + y + z  // Sugar for: QAdd(x, y, z, total)
-qint[4] diff = x - y - z   // Sugar for: QSub(x, y, z, diff)
+quint(4) num1 = 2
+quint(4) num2 = 3
+quint(4) num3 = 4
+quint(4) total = num1 + num2 + num3  // Sugar for: QAdd(num1, num2, num3, total)
+quint(4) diff = num1 - num2 - num3   // Sugar for: QSub(num1, num2, num3, diff)
 
-qint[3] r = (a + b) * c   // Compound expression with precedence
-qint[4] q = a / b         // Sugar for: QDiv(a, b, q, _remainder)
-qint[4] m = a % b         // Sugar for: QMod(a, b, m)
+quint(3) r = (a + b) * c   // Compound expression with precedence
+quint(4) q = a / b         // Sugar for: QDiv(a, b, q, _remainder)
+quint(4) m = a % b         // Sugar for: QMod(a, b, m)
 
-qint[4] val = 3
-qint[4] sum = val + 5     // Classical constants in qint expressions
-qint[] out = val + sum    // Type required (qint[]); bit width inferred from operands
-qint[4] noop = val + 0    // Simplified: no full adder (identity)
-qint[4] zero = val * 0    // Simplified: direct zero initialization
+quint(4) val = 3
+quint(4) sum = val + 5     // Classical constants in qint expressions
+quint() out = val + sum    // Type required (quint()); bit width inferred from operands
+quint(4) noop = val + 0    // Simplified: no full adder (identity)
+quint(4) zero = val * 0    // Simplified: direct zero initialization
 ```
 
 **Default Desugaring:**
-- `qint[] z = x + y` → `qint[N] z; QAdd(x, y, z)` where `N` is inferred from operand widths (`qint[]` without an initializer is rejected)
-- `qint[n] z = x + y` → `qint[n] z; QAdd(x, y, z)` (uses ripple-carry adder)
-- `qint d = x - y` → `qint d; QSub(x, y, d)` (uses ripple-borrow subtractor)
-- `qint w = x * y` → `qint w; QMult(x, y, w)` (uses shift-and-add multiplier)
-- `qint q = x / y` → `qint q, _remainder; QDiv(x, y, q, _remainder)` (division with remainder)
-- `qint m = x % y` → `qint m; QMod(x, y, m)` (modulus operation)
+- `quint() out = a + b` → `qint[N] out; QAdd(a, b, out)` where `N` is inferred from operand widths (`quint()` without an initializer is rejected)
+- `qint[n] out = a + b` → `qint[n] out; QAdd(a, b, out)` (uses ripple-carry adder)
+- `qint d = a - b` → `qint d; QSub(a, b, d)` (uses ripple-borrow subtractor)
+- `qint w = a * b` → `qint w; QMult(a, b, w)` (uses shift-and-add multiplier)
+- `qint q = a / b` → `qint q, _remainder; QDiv(a, b, q, _remainder)` (division with remainder)
+- `qint m = a % b` → `qint m; QMod(a, b, m)` (modulus operation)
 - Operator precedence: `*`, `/`, `%` bind tighter than `+`, `-`
 - Automatic destination initialization
-- Classical integer constants (`x + 5`, `a * 3`) are materialized as `qint` registers
+- Classical integer constants (`a + 5`, `a * 3`) are materialized as `qint` registers
 - Algebraic simplification: `a + 0`, `a * 1`, `a * 0` avoid unnecessary arithmetic circuits
 - Compile-time width checks: mismatched `qint[n]` operands are rejected
 
@@ -1005,9 +1073,9 @@ qint[4] zero = val * 0    // Simplified: direct zero initialization
 - The `/` operator computes the quotient and creates a temporary remainder variable
 - To get both quotient and remainder, use explicit `QDiv()`:
   ```quanta
-  qint[4] dividend = 7
-  qint[4] divisor = 3
-  qint[4] quotient, remainder
+  quint(4) dividend = 7
+  quint(4) divisor = 3
+  quint(4) quotient, remainder
   QDiv(dividend, divisor, quotient, remainder)  // Get both values
   ```
 
@@ -1017,23 +1085,23 @@ For optimal performance, use explicit function calls when you need specific impl
 
 ```quanta
 // For large bit widths or modular arithmetic, use QFTAdd explicitly
-qint[64] a, b, c
+quint(64) a, b, c
 QFTAdd(a, b, c)          // Better than: c = a + b (which uses QAdd)
 
 // For multi-operand addition with parallelism, use QTreeAdd
-qint[16] x, y, z, w, sum
-QTreeAdd(x, y, z, w, sum)  // Better than: sum = x + y + z + w
+quint(16) a, b, c, d, sum
+QTreeAdd(a, b, c, d, sum)  // Better than: sum = a + b + c + d
 
 // For T-count optimization, use QTreeMult explicitly
-qint[8] m1, m2, product
+quint(8) m1, m2, product
 QTreeMult(m1, m2, product)  // Better than: product = m1 * m2
 
 // For space-constrained scenarios, use QExpEncMult
-qint[32] a, b, result
+quint(32) a, b, result
 QExpEncMult(a, b, result)   // Uses logarithmic qubits
 
 // For division with remainder, use QDiv explicitly
-qint[8] dividend, divisor, quotient, remainder
+quint(8) dividend, divisor, quotient, remainder
 QDiv(dividend, divisor, quotient, remainder)  // Get both quotient and remainder
 ```
 
@@ -1047,31 +1115,31 @@ QDiv(dividend, divisor, quotient, remainder)  // Get both quotient and remainder
 #### `Compare` - Quantum Comparison
 
 ```quanta
-qint[3] a
-qint[3] b
-qint[1] flag              // or qbit flag
+quint(3) a
+quint(3) b
+quint(1) flag              // or qbit flag
 Compare(a, b, flag)        // flag = (a >= b)
 ```
 
 **Semantics:**
-- `flag` must be `qint[1]` or `qbit`
+- `flag` must be `quint(1)` or `qbit`
 - Result usable only as **quantum control**
 - `|a⟩|b⟩|0⟩ → |a⟩|b⟩|a ≥ b⟩`
 
 #### `Grover` - Grover Operator
 
 ```quanta
-qint[3] x
-H(x)                      // Create uniform superposition
-Grover(x, 5)              // Amplify probability of x == 5
+quint(3) reg
+H(reg)                      // Create uniform superposition
+Grover(reg, 5)              // Amplify probability of reg == 5
 ```
 
 **Semantics:**
-- Applies Grover iteration over register `x`
-- Oracle: phase-flip states where `x == target`
+- Applies Grover iteration over register `reg`
+- Oracle: phase-flip states where `reg == target`
 - Diffusion operator
 - `target` must be classical (`int` or `bint`)
-- `x` should be in uniform superposition beforehand
+- `reg` should be in uniform superposition beforehand
 
 ### Gate Calls (Core Feature)
 
@@ -1312,10 +1380,11 @@ Unrolled at compile time.
 #### If / Else (Classical Only)
 
 ```quanta
-if (x > 0) {
-    x = x - 1
+int n = 3
+if (n > 0) {
+    n = n - 1
 } else {
-    x = x + 1
+    n = n + 1
 }
 ```
 
@@ -1331,9 +1400,9 @@ class Pair {
     var a
     var b
 
-    func init(x, y) {
-        a = x
-        b = y
+    func init(u, v) {
+        a = u
+        b = v
     }
 }
 ```
@@ -1529,35 +1598,35 @@ Print(c)
 
 ```quanta
 // Quantum integer arithmetic
-qint[3] a = 1
-qint[3] b = 3
-qint[3] c = a + b        // Operator overloading
+quint(3) a = 1
+quint(3) b = 3
+quint(3) c = a + b        // Operator overloading
 
 // Inferred bit width (type required, size optional)
-qint[4] x = 2
-qint[4] y = 3
-qint[] sum = x + y       // sum inferred as qint[4]
+quint(4) num1 = 2
+quint(4) num2 = 3
+quint() sum = num1 + num2       // sum inferred as quint(4)
 
 // Classical constant operand
-qint[4] offset = x + 5
+quint(4) offset = num1 + 5
 
 // Multiple operands
-qint[4] d = 4
-qint[4] total = x + y + d  // QAdd(x, y, d, total)
+quint(4) d = 4
+quint(4) total = num1 + num2 + d  // QAdd(num1, num2, d, total)
 
 // Precedence: multiply before add
-qint[4] r = x + y * d      // QMult(y, d, _temp); QAdd(x, _temp, r)
+quint(4) r = num1 + num2 * d      // QMult(num2, d, _temp); QAdd(num1, _temp, r)
 
 // Multiplication
-qint[3] m1 = 2
-qint[3] m2 = 3
-qint[5] product
+quint(3) m1 = 2
+quint(3) m2 = 3
+quint(5) product
 QMult(m1, m2, product)    // product = m1 * m2
 
 // Comparison
-qint[3] val1
-qint[3] val2
-qint[1] flag
+quint(3) val1
+quint(3) val2
+quint(1) flag
 Compare(val1, val2, flag)  // flag = (val1 >= val2)
 ```
 
@@ -1565,28 +1634,28 @@ Compare(val1, val2, flag)  // flag = (val1 >= val2)
 
 ```quanta
 // QFT-based addition (lower depth)
-qint[8] a = 5
-qint[8] b = 7
-qint[8] c
+quint(8) a = 5
+quint(8) b = 7
+quint(8) c
 QFTAdd(a, b, c)            // Fast QFT adder
 
 // Tree-based addition (parallel)
-qint[8] x = 2
-qint[8] y = 3
-qint[8] z = 4
-qint[8] sum
-QTreeAdd(x, y, z, sum)     // Parallel tree adder
+quint(8) p = 2
+quint(8) q = 3
+quint(8) r = 4
+quint(8) sum
+QTreeAdd(p, q, r, sum)     // Parallel tree adder
 
 // Exponent-encoded multiplication (logarithmic qubits)
-qint[4] m1 = 3
-qint[4] m2 = 5
-qint[8] exp_product
+quint(4) m1 = 3
+quint(4) m2 = 5
+quint(8) exp_product
 QExpEncMult(m1, m2, exp_product)  // Uses ~log(n) qubits
 
 // Tree-based multiplication (reduced T-count)
-qint[4] n1 = 2
-qint[4] n2 = 3
-qint[8] tree_product
+quint(4) n1 = 2
+quint(4) n2 = 3
+quint(8) tree_product
 QTreeMult(n1, n2, tree_product)  // Wallace/Dadda-style
 ```
 
@@ -1594,44 +1663,45 @@ QTreeMult(n1, n2, tree_product)  // Wallace/Dadda-style
 
 ```quanta
 // Quantum subtraction
-qint[4] a = 7
-qint[4] b = 3
-qint[4] diff = a - b        // diff = 4 (using QSub)
+quint(4) a = 7
+quint(4) b = 3
+quint(4) diff = a - b        // diff = 4 (using QSub)
 
 // Variadic subtraction
-qint[4] x = 15
-qint[4] y = 5
-qint[4] z = 2
-qint[4] result = x - y - z  // result = 8 (using QSub)
+quint(4) num1 = 15
+quint(4) num2 = 5
+quint(4) num3 = 2
+quint(4) result = num1 - num2 - num3  // result = 8 (using QSub)
 
 // Quantum division with remainder
-qint[4] dividend = 7
-qint[4] divisor = 3
-qint[4] quotient, remainder
+quint(4) dividend = 7
+quint(4) divisor = 3
+quint(4) quotient, remainder
 QDiv(dividend, divisor, quotient, remainder)  // quotient = 2, remainder = 1
 
 // Division using operator
-qint[4] q = dividend / divisor  // q = 2 (quotient only, remainder discarded)
+quint(4) q = dividend / divisor  // q = 2 (quotient only, remainder discarded)
 
 // Quantum modulus
-qint[4] value = 7
-qint[4] mod = 3
-qint[4] r = value % mod     // r = 1 (using QMod)
+quint(4) value = 7
+quint(4) mod = 3
+quint(4) r = value % mod     // r = 1 (using QMod)
 
 // Chained modulus operations
-qint[4] a = 25
-qint[4] b = 7
-qint[4] c = 3
-qint[4] result = a % b % c  // result = (25 mod 7) mod 3 = 4 mod 3 = 1
+quint(4) a = 25
+quint(4) b = 7
+quint(4) c = 3
+quint(4) result = a % b % c  // result = (25 mod 7) mod 3 = 4 mod 3 = 1
 ```
 
 #### Example 3: Grover's Algorithm
 
 ```quanta
-qint[3] x
-H(x)                      // Create uniform superposition
-Grover(x, 5)              // Search for value 5
-Measure(x, c)
+quint(3) reg
+H(reg)                      // Create uniform superposition
+Grover(reg, 5)              // Search for value 5
+bit c
+Measure(reg, c)
 ```
 
 #### Generated OpenQASM 3 (Bell State Example)
@@ -1655,14 +1725,14 @@ measure q[1] -> c[1];
 Optional by default:
 
 ```quanta
-var x = 1
-var y = 2;
+var a = 1
+var b = 2;
 ```
 
 Required on same line:
 
 ```quanta
-var x = 1; var y = 2
+var a = 1; var b = 2
 ```
 
 ### Identity Statement
@@ -1707,7 +1777,7 @@ The `tests/` directory (191 tests) includes:
 | `test_indexing.py` | Fancy indexing |
 | `test_tensors.py` | Tensor types and declarations |
 | `test_tensor_algebra.py` | Dot/cross/elementwise/Kronecker products |
-| `test_qint_operators.py` | `qint` `+`/`*`, `qint[]` size inference, constants, simplification, width checks |
+| `test_qint_operators.py` | `qint` `+`/`*`, `quint()` size inference, constants, simplification, width checks |
 | `test_fidelity.py` | `Fidelity()` metric |
 | `test_print_formatting.py` | f-string print specifiers |
 

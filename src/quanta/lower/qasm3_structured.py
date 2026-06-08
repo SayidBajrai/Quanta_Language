@@ -73,6 +73,10 @@ class StructuredQASMGenerator(QASM3Generator):
         return kind
 
     def _param_to_qasm_type(self, pspec: ParamSpec) -> str:
+        from ..types.kinds import is_wildcard_type, qasm_param_type
+
+        if is_wildcard_type(pspec.kind):
+            return qasm_param_type(pspec.kind, pspec.size)
         qasm_kind = self._qasm_quantum_kind(pspec.kind)
         if pspec.size and pspec.size > 1:
             return f"{qasm_kind}[{pspec.size}]"

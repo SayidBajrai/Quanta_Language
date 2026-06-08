@@ -260,7 +260,7 @@ def _get_reduced_statevector(sv: "Statevector", indices: List[int]) -> Tuple["St
 def _resolve_qbit_indices(expr: Expr, ctx: FormatContext) -> List[int]:
     if isinstance(expr, VarExpr) and expr.name in ctx.reg_kind:
         kind = ctx.reg_kind[expr.name]
-        if kind in ("qbit", "qint"):
+        if kind in ("qbit", "qint", "quint", "qdec", "qudec", "qfloat", "qreal"):
             size = ctx.reg_sizes.get(expr.name, 1)
             return [ctx.qbit_map[(expr.name, i)] for i in range(size)]
     if isinstance(expr, IndexExpr) and isinstance(expr.base, VarExpr):
@@ -386,7 +386,7 @@ def _format_trace_arg(
             if key in ctx.qbit_map:
                 return f"{expr.base.name}[{idx}]", [ctx.qbit_map[key]]
     if isinstance(expr, VarExpr):
-        if ctx.reg_kind.get(expr.name) in ("qbit", "qint"):
+        if ctx.reg_kind.get(expr.name) in ("qbit", "qint", "quint", "qdec", "qudec", "qfloat", "qreal"):
             size = ctx.reg_sizes.get(expr.name, 1)
             indices = [ctx.qbit_map[(expr.name, i)] for i in range(size)]
             if size == 1:

@@ -105,6 +105,46 @@ Print(y2)
     assert get_prints(source) == "0.8\n0.6\n1.6"
 
 
+def test_cross_product_operator():
+    source = """
+float[3] a = [1.0, 2.0, 3.0]
+float[3] b = [4.0, 5.0, 6.0]
+float[3] c = a * b
+Print(c)
+"""
+    assert get_prints(source) == "[-3.0, 6.0, -3.0]"
+
+
+def test_hadamard_operator():
+    source = """
+float[2][2] A = [[1, 2], [3, 4]]
+float[2][2] B = [[5, 6], [7, 8]]
+float[2][2] C = A ⊙ B
+Print(C)
+"""
+    assert get_prints(source) == "[[5, 12], [21, 32]]"
+
+
+def test_kron_operator():
+    source = """
+float[2] a = [1, 2]
+float[2] b = [3, 4]
+Print(a ⊗ b)
+"""
+    assert get_prints(source) == "[3, 4, 6, 8]"
+
+
+def test_star_on_matrices_requires_hadamard():
+    source = """
+float[2][2] A = [[1, 2], [3, 4]]
+float[2][2] B = [[0, 5], [6, 7]]
+var C = A * B
+Print(C)
+"""
+    with pytest.raises(QuantaSemanticError, match="⊙"):
+        get_prints(source)
+
+
 def test_dot_product_rank_error():
     with pytest.raises(QuantaSemanticError, match="DotProduct"):
         dot_product([[1, 2]], [1, 2])

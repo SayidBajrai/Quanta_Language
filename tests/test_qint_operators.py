@@ -72,7 +72,7 @@ def _transformed_sizes(source: str) -> dict[str, int]:
 
     for stmt in ast.statements:
 
-        if hasattr(stmt, "kind") and stmt.kind == "qint" and hasattr(stmt, "size"):
+        if hasattr(stmt, "kind") and stmt.kind in ("qint", "quint") and hasattr(stmt, "size"):
 
             sizes[stmt.name] = stmt.size
 
@@ -86,13 +86,13 @@ def test_chained_addition_desugar():
 
     source = """
 
-qint[2] a
+quint(2) a
 
-qint[2] b
+quint(2) b
 
-qint[2] d
+quint(2) d
 
-qint[2] total = a + b + d
+quint(2) total = a + b + d
 
 """
 
@@ -106,13 +106,13 @@ def test_precedence_multiply_before_add():
 
     source = """
 
-qint[2] x
+quint(2) x
 
-qint[2] y
+quint(2) y
 
-qint[2] z
+quint(2) z
 
-qint[2] r = x + y * z
+quint(2) r = x + y * z
 
 """
 
@@ -126,13 +126,13 @@ def test_parenthesized_compound_expression():
 
     source = """
 
-qint[2] a
+quint(2) a
 
-qint[2] b
+quint(2) b
 
-qint[2] c
+quint(2) c
 
-qint[2] r = (a + b) * c
+quint(2) r = (a + b) * c
 
 """
 
@@ -146,13 +146,13 @@ def test_variadic_qmult_lowering():
 
     source = """
 
-qint[2] a
+quint(2) a
 
-qint[2] b
+quint(2) b
 
-qint[2] c
+quint(2) c
 
-qint[4] out
+quint(4) out
 
 QMult(a, b, c, out)
 
@@ -171,11 +171,11 @@ def test_simple_add_compiles():
 
     source = """
 
-qint[2] a
+quint(2) a
 
-qint[2] b
+quint(2) b
 
-qint[2] c = a + b
+quint(2) c = a + b
 
 """
 
@@ -191,11 +191,11 @@ def test_infer_size_from_operands():
 
     source = """
 
-qint[3] a
+quint(3) a
 
-qint[3] b
+quint(3) b
 
-qint[] z = a + b
+quint() z = a + b
 
 """
 
@@ -211,9 +211,9 @@ def test_infer_size_with_constant_operand():
 
     source = """
 
-qint[4] x
+quint(4) x
 
-qint[] y = x + 5
+quint() y = x + 5
 
 """
 
@@ -229,9 +229,9 @@ def test_constant_addition_desugar():
 
     source = """
 
-qint[4] x
+quint(4) x
 
-qint[4] y = x + 5
+quint(4) y = x + 5
 
 """
 
@@ -247,11 +247,11 @@ def test_constant_multiplication_desugar():
 
     source = """
 
-qint[3] x
+quint(3) x
 
-qint[3] y
+quint(3) y
 
-qint[3] z = x * y * 3
+quint(3) z = x * y * 3
 
 """
 
@@ -267,9 +267,9 @@ def test_add_zero_simplification():
 
     source = """
 
-qint[4] a
+quint(4) a
 
-qint[4] r = a + 0
+quint(4) r = a + 0
 
 """
 
@@ -287,9 +287,9 @@ def test_multiply_zero_simplification():
 
     source = """
 
-qint[4] a
+quint(4) a
 
-qint[4] r = a * 0
+quint(4) r = a * 0
 
 """
 
@@ -305,9 +305,9 @@ def test_multiply_one_simplification():
 
     source = """
 
-qint[4] a
+quint(4) a
 
-qint[4] r = a * 1
+quint(4) r = a * 1
 
 """
 
@@ -323,11 +323,11 @@ def test_width_mismatch_rejected():
 
     source = """
 
-qint[2] a
+quint(2) a
 
-qint[4] b
+quint(4) b
 
-qint[4] c = a + b
+quint(4) c = a + b
 
 """
 
@@ -343,11 +343,11 @@ def test_qint_empty_brackets_without_init_rejected():
 
     source = """
 
-qint[] z;
+quint() n;
 
 """
 
-    with pytest.raises(QuantaSemanticError, match="qint\\[\\]"):
+    with pytest.raises(QuantaSemanticError, match="quint\\(\\)"):
 
         compile(source)
 
@@ -359,17 +359,17 @@ def test_temp_reuse_across_statements():
 
     source = """
 
-qint[2] a
+quint(2) a
 
-qint[2] b
+quint(2) b
 
-qint[2] c
+quint(2) c
 
-qint[2] d
+quint(2) d
 
-qint[2] r1 = a + b * c
+quint(2) r1 = a + b * c
 
-qint[2] r2 = d + b * c
+quint(2) r2 = d + b * c
 
 """
 
@@ -389,7 +389,7 @@ qint[2] r2 = d + b * c
 
         for stmt in ast.statements
 
-        if hasattr(stmt, "kind") and stmt.kind == "qint" and stmt.name.startswith("_temp_")
+        if hasattr(stmt, "kind") and stmt.kind == "quint" and stmt.name.startswith("_temp_")
 
     ]
 
