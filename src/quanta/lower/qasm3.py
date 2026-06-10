@@ -9,7 +9,7 @@ from ..ast.nodes import (
     ForStmt, WhileStmt, IfStmt, ReturnStmt, ExprStmt,
     CallExpr, IndexExpr, SingleIndex, SliceIndex, BinaryExpr, UnaryExpr,
     VarExpr, LiteralExpr, ListExpr, GroupExpr, AssignExpr,
-    Node
+    Node, NoiseModelDecl,
 )
 from ..ast.visitor import Visitor
 from ..runtime.quantum_arithmetic import (
@@ -274,6 +274,10 @@ class QASM3Generator(Visitor):
         """Class declarations don't generate QASM"""
         pass
 
+    def visit_noisemodel_decl(self, node: NoiseModelDecl) -> None:
+        """NoiseModel declarations are metadata for runtime -- no QASM output."""
+        pass
+
     def visit_while_stmt(self, node: WhileStmt) -> None:
         """While loops require structured compilation mode."""
         pass
@@ -374,7 +378,8 @@ class QASM3Generator(Visitor):
                 self.lines.append(f"measure {q_str} -> {c_str};")
                 return
             elif name in ["len", "range", "assert", "error", "warn"]:
-                # These are compile-time or frontend-only
+                return
+            elif name == "Analyze":
                 return
             elif name == "reset" and len(node.args) == 1:
                 q = self._expr_to_qasm(node.args[0])
@@ -1137,5 +1142,7 @@ class QASM3Generator(Visitor):
             return self.visit_group_expr(node)
         elif isinstance(node, AssignExpr):
             return self.visit_assign_expr(node)
+        elif isinstance(node, NoiseModelDecl):
+            return self.visit_noisemodel_decl(node)
         else:
             raise NotImplementedError(f"No visit method for {type(node).__name__}")

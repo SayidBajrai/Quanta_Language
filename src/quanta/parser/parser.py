@@ -2,7 +2,7 @@
 Parser for Quanta language - builds AST from tokens
 """
 
-from typing import List, Optional
+from typing import List, Optional, Dict
 from ..lexer.lexer import Token, TokenType
 from ..ast.nodes import (
     Program, Stmt, Expr,
@@ -10,6 +10,7 @@ from ..ast.nodes import (
     ForStmt, WhileStmt, IfStmt, ReturnStmt, ExprStmt,
     CallExpr, IndexExpr, IndexItem, SingleIndex, SliceIndex, SliceFull, BinaryExpr, UnaryExpr,
     VarExpr, LiteralExpr, FStringExpr, FStringPart, ListExpr, GroupExpr, AssignExpr,
+    NoiseModelDecl,
 )
 from ..errors import QuantaSyntaxError
 from ..types.tensor import TensorType
@@ -93,6 +94,8 @@ class Parser:
             return self._parse_if()
         elif self._match(TokenType.RETURN):
             return self._parse_return()
+        elif self._match(TokenType.NOISEMODEL):
+            return self._parse_noisemodel()
         else:
             # Expression statement
             expr = self._parse_expression()
@@ -567,6 +570,27 @@ class Parser:
             value = self._parse_expression()
         self._match(TokenType.SEMICOLON)  # Optional semicolon
         return ReturnStmt(value)
+
+    def _parse_noisemodel(self) -> NoiseModelDecl:
+        params: Dict[str, float] = {}
+        self._consume(TokenType.LBRACE, "Expected '{' after NoiseModel")
+        while not self._check(TokenType.RBRACE) and not self._is_at_end():
+            while self._check(TokenType.NEWLINE):
+                self._advance()
+            if self._check(TokenType.RBRACE):
+                break
+            key_token = self._consume(TokenType.IDENT, "Expected parameter name in NoiseModel")
+            key = key_token.value
+            self._consume(TokenType.EQ, "Expected '=' after parameter name")
+            value_expr = self._parse_expression()
+            if isinstance(value_expr, LiteralExpr):
+                try:
+                    params[key] = float(value_expr.value)
+                except (ValueError, TypeError):
+                    params[key] = 0.0
+            self._match(TokenType.COMMA)
+        self._consume(TokenType.RBRACE, "Expected '}' after NoiseModel")
+        return NoiseModelDecl(params)
     
     def _parse_expression(self) -> Expr:
         """Parse an expression"""

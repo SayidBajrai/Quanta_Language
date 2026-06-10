@@ -27,6 +27,7 @@ class TokenType(Enum):
     IN = "IN"
     CTRL = "CTRL"
     INV = "INV"
+    NOISEMODEL = "NOISEMODEL"
     
     # Types
     INT = "INT"
@@ -132,6 +133,7 @@ class Lexer:
         "in": TokenType.IN,
         "ctrl": TokenType.CTRL,
         "inv": TokenType.INV,
+        "NoiseModel": TokenType.NOISEMODEL,
         "int": TokenType.INT,
         "float": TokenType.FLOAT,
         "bool": TokenType.BOOL,

@@ -52,6 +52,9 @@ SPECIFIER_ALIASES: Dict[str, str] = {
     "bv": "bloch_vector",
     "circuit": "circuit",
     "circ": "circuit",
+    "pathway": "pathway",
+    "path": "pathway",
+    "pathway_circuit": "pathway",
 }
 
 
@@ -507,6 +510,7 @@ class QuantumFormatter:
             "bloch": QuantumFormatter._format_bloch,
             "bloch_vector": QuantumFormatter._format_bloch_vector,
             "circuit": QuantumFormatter._format_circuit,
+            "pathway": QuantumFormatter._format_pathway,
         }
         handler = handlers.get(spec, QuantumFormatter._format_symbolic)
         return handler(expr, ctx)
@@ -690,6 +694,31 @@ class QuantumFormatter:
             "",
             f"TOTAL GATES: {total_gates}",
             f"DEPTH: {depth}",
+            f"QUBITS: {len(indices)}",
+        ])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_pathway(expr: Expr, ctx: FormatContext) -> str:
+        indices = _resolve_qbit_indices(expr, ctx)
+        if not indices:
+            return "<pathway trace unavailable>"
+        filtered = _filter_execution_trace(ctx.execution_trace, indices)
+        lines = [
+            "PATHWAY TRACE",
+            "--------------------------------",
+        ]
+        if not filtered:
+            lines.append("(no gates recorded)")
+            return "\n".join(lines)
+        for step, entry in enumerate(filtered, start=1):
+            lines.append(f"Step {step}: {entry.display}")
+            if entry.children:
+                for child in entry.children:
+                    lines.append(f"  \u2514 {child.display}")
+        lines.extend([
+            "",
+            f"TOTAL STEPS: {len(filtered)}",
             f"QUBITS: {len(indices)}",
         ])
         return "\n".join(lines)

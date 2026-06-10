@@ -10,6 +10,12 @@
 - 🎯 **OpenQASM 3 output** - Direct compilation to standard QASM
 - 🚀 **Qiskit integration** - Seamless execution with Qiskit backends
 - 🖥️ **Frontend debug** - `get_prints(source)` runs a statevector sim and returns all `Print()` output (simulator only)
+- 📊 **Resource estimation** - `analyze(source)` returns qubit count, depth, T-count, 2Q gates, gate breakdown, estimated runtime
+- ⚡ **Compiler optimization** - Gate fusion (`H+H→I`, `RZ+RZ→RZ`), commutation, depth reduction, hardware-native lowering
+- 🔍 **Pathway tracing** - `f"{q:pathway}"` shows step-by-step gate execution trace with entanglement tracking
+- 🎛️ **Hardware lowering** - `compile(optimize_target="ibm_brisbane")` lowers CNOT→ECR for IBM, etc.
+- 📈 **Hardware backends** - Built-in database for IBM Brisbane/Sherbrooke/Kyoto, IonQ Aria/Forte
+- 🌐 **Noise simulation** - `NoiseModel { depolarizing=0.01 }` declarations + `run(noisy=True)`
 
 ## Installation
 
@@ -24,7 +30,7 @@ Requires Python 3.10+ and Qiskit.
 ### As a Library
 
 ```python
-from quanta import compile, run, get_prints
+from quanta import compile, run, get_prints, analyze, list_backends, backend_info
 
 # Compile Quanta source to OpenQASM 3
 source = """
@@ -51,6 +57,28 @@ print(result)
 debug_source = "qbit q\nH(q)\nPrint(q)"
 terminal = get_prints(debug_source)
 print(terminal)  # e.g. "1/sqrt(2) * |0> + 1/sqrt(2) * |1>"
+
+# Resource estimation (counts depth, T-count, gates, runtime, hardware fit)
+report = analyze(source, hardware_backends=["ibm_brisbane", "ionq_aria"])
+print(f"Depth: {report.depth}, T-count: {report.t_count}, Runtime: {report.estimated_runtime}")
+print(f"Backend fit: {report.hardware_fits}")
+
+# Compile with depth reduction optimization
+qasm_opt = compile(source, depth_reduction=True)
+
+# Compile with hardware-native lowering
+qasm_hw = compile(source, optimize_target="ibm_brisbane")
+
+# Compile + analyze in one pass
+result = compile(source, analyze=True)
+print(f"QASM: {result.qasm}, Depth: {result.metrics.depth}")
+
+# Run with noise simulation
+result_noisy = run(source, shots=1024, noisy=True, depolarizing=0.01)
+
+# List available hardware backends
+print(list_backends())
+print(backend_info("ibm_brisbane"))
 ```
 
 ### CLI Usage
@@ -122,7 +150,7 @@ measure q[1] -> c[1];
 - **Quantum Arithmetic**: `QAdd`, `QMult`, `Compare`, `Grover`; operator overloading (`+`, `-`, `*`, `/`, `%`) on `quint`/`qint`; `quint()` size inference; signed `qint`/`qdec`; interval `qreal`; classical `uint`/`dec`/`udec`
 - **Standard Library**: `Print()`, `Len()`, `Measure()`, `Assert()`, `Range()`
 - **Constants**: Built-in `pi`, `e`, and user-defined `const` declarations
-- **API**: `compile(source, keep_structure=False)`, `run(source, shots=...)`, `get_prints(source)` (frontend debug, simulator only)
+- **API**: `compile(source, keep_structure=False, depth_reduction=False, optimize_target="", analyze=False)`, `run(source, shots=..., noisy=False, depolarizing=..., ...)`, `get_prints(source)` (frontend debug, simulator only), `analyze(source, hardware_backends=None)`, `list_backends()`, `backend_info(name)`
 
 > OpenQASM 3 output uses the standard keyword `qubit` (Quanta source uses `qbit`).
 
@@ -1454,6 +1482,7 @@ Print(q:summary)            // ❌ invalid syntax
 |`bloch`||Bloch sphere (single qubit or reduced subsystem)|
 |`bloch_vector`|`blochvector`, `bv`|Bloch vector tuple only|
 |`circuit`|`circ`|Gate execution trace for the register|
+|`pathway`|`path`, `pathway_circuit`|Step-by-step state evolution trace with entanglement tracking|
 
 **`:summary` example** (Bell state):
 
@@ -1574,6 +1603,144 @@ Warn("Simulator-only feature")
   ```quanta
   Warn("This circuit uses features only available in simulators")
   ```
+
+### Resource Estimation & Complexity Analysis
+
+Analyze circuits at the IR level (post macro expansion) for accurate metrics:
+
+```python
+from quanta import analyze
+
+report = analyze("""
+qbit[4] q
+Bell(q[0], q[1])
+QFT(q)
+""")
+
+print(f"Depth: {report.depth}")          # 8
+print(f"T-count: {report.t_count}")      # 2
+print(f"2Q gates: {report.two_qubit_gate_count}")  # 8
+print(f"Runtime: {report.estimated_runtime}")       # "880 ns"
+print(f"Qubits: {report.qubit_count}")   # 4
+print(f"Gates: {report.gate_count}")     # 12
+print(f"Breakdown: {report.gate_breakdown}")  # {"h": 4, "crz": 6, "swap": 2}
+```
+
+**Hardware backend fitting** — check if a circuit fits on real hardware:
+
+```python
+report = analyze(source, hardware_backends=["ibm_brisbane", "ionq_aria"])
+print(report.hardware_fits)  # {"ibm_brisbane": True, "ionq_aria": True}
+```
+
+**In Quanta source**, the `Analyze()` builtin triggers the same machinery:
+
+```quanta
+qbit[4] q
+Bell(q[0], q[1])
+Analyze(true)  // prints resource analysis at compile time
+```
+
+**Architecture**: Analysis operates on the IR (intermediate representation) after macro expansion, not on source text — ensuring accurate depth, gate counts, and cost metrics.
+
+### Compiler Optimization Passes
+
+Enable optimization via `compile(..., depth_reduction=True)` or specify a hardware target for native gate lowering.
+
+**Gate fusion** (automatic when `depth_reduction=True`):
+
+| Pattern | Result |
+|---------|--------|
+| `H H` | removed (identity) |
+| `X X` | removed (identity) |
+| `RZ(a) RZ(b)` | `RZ(a + b)` |
+| `RX(a) RX(b)` | `RX(a + b)` |
+| `CNOT CNOT` (same qubits) | removed (identity) |
+
+**Commutation** — commuting gates are reordered to enable more fusion opportunities. Gates on disjoint qubits (`H q[0]` and `H q[1]`), and same-type rotations (`RZ` with `RZ`) always commute.
+
+**Hardware-native lowering**:
+
+```python
+# CNOT → ECR + single-qubit rotations (IBM)
+qasm_ibm = compile(source, optimize_target="ibm_brisbane")
+
+# Swap → 3 × native 2Q gate
+qasm_ionq = compile(source, optimize_target="ionq_aria")
+```
+
+**Combined optimization**:
+
+```python
+qasm = compile(source, depth_reduction=True, optimize_target="ibm_brisbane")
+```
+
+### Pathway Tracing & Quantum Debugging
+
+Visualize how individual qubit states evolve through a circuit using the `pathway` format specifier:
+
+```quanta
+qbit[2] q
+H(q[0])
+CNOT(q[0], q[1])
+Print(f"{q:pathway}")
+```
+
+Output:
+```
+PATHWAY TRACE
+--------------------------------
+Step 1: H(q[0])
+Step 2: CNOT(q[0], q[1])
+
+TOTAL STEPS: 2
+QUBITS: 2
+```
+
+Filter to a single qubit's pathway:
+```quanta
+Print(f"{q[0]:pathway}")
+```
+
+The pathway tracer works both at **compile time** (via `analyze(source).circuit_pathway`) and **runtime** (via `get_prints()` with the `pathway` format specifier). When qubits become entangled, the pathway shows which additional qubits are included:
+
+```
+Step 2: CNOT(q[0], q[1])
+q_0, q_1: entangled CNOT operation (entangled; includes q_1)
+```
+
+### Noise / Error Simulation
+
+Declare noise models directly in Quanta source:
+
+```quanta
+NoiseModel {
+    depolarizing = 0.01
+    readout = 0.03
+}
+
+qbit[2] q
+Bell(q[0], q[1])
+```
+
+Then run with noise:
+
+```python
+from quanta import run
+
+# Automatically detects NoiseModel from source
+result = run(source, shots=1024, noisy=True)
+```
+
+Or specify noise parameters explicitly:
+
+```python
+result = run(source, shots=1024, noisy=True,
+             depolarizing=0.01, readout_error=0.03,
+             t1=150.0, t2=100.0)
+```
+
+Noise is applied via Qiskit Aer's noise model infrastructure — including depolarizing, readout, and thermal relaxation errors.
 
 ### Complete Examples
 
@@ -1751,7 +1918,7 @@ var a = 1; var b = 2
 # Install in development mode (from project root)
 pip install -e .[dev]
 
-# Run the test suite (Windows) — 127 pytest tests
+# Run the test suite (Windows) — 252 pytest tests
 test.bat
 
 # Or run pytest directly (set PYTHONPATH=src if not installed)
@@ -1765,7 +1932,7 @@ black src
 ruff check src
 ```
 
-The `tests/` directory (191 tests) includes:
+The `tests/` directory (252 tests) includes:
 
 | Module | Coverage |
 |--------|----------|
@@ -1780,6 +1947,12 @@ The `tests/` directory (191 tests) includes:
 | `test_qint_operators.py` | `qint` `+`/`*`, `quint()` size inference, constants, simplification, width checks |
 | `test_fidelity.py` | `Fidelity()` metric |
 | `test_print_formatting.py` | f-string print specifiers |
+| `test_func_overloading.py` | Function overload resolution |
+| `test_grover_simulation.py` | Grover's algorithm |
+| `test_numeric_types.py` | Numeric type defaults and signed semantics |
+| `test_qint_arithmetic_simulation.py` | Frontend QAdd/QSub/QMult simulation |
+| `test_reserved_names.py` | QASM identifier collision checks |
+| `test_wildcard_types.py` | `var` / `qvar` / `cvar` matching |
 
 ## License
 

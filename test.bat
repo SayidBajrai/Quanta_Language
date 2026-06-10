@@ -26,11 +26,16 @@ if errorlevel 1 (
 
 echo.
 echo Running pytest...
-echo   - numeric types: bare defaults (qint/qdec/qreal) and () syntax
-echo   - signed two's complement and qreal interval mapping
-echo   - quint operator desugaring (QAdd/QSub/QMult/QDiv/QMod)
-echo   - frontend arithmetic simulation
-echo   - OpenQASM lowering
+echo   - 252 tests covering the full compiler pipeline
+echo   - lexer, parser, AST, semantic analysis
+echo   - lowering to OpenQASM 3 (flat and structured)
+echo   - numeric types, qint operator overloading
+echo   - quantum arithmetic simulation (QAdd/QSub/QMult/QDiv/QMod)
+echo   - fancy indexing and tensor algebra
+echo   - function overloading and wildcard types
+echo   - print formatting with f-string specifiers
+echo   - reserved name validation
+echo   - Grover's algorithm, Fidelity metric
 echo.
 
 python -m pytest tests\ -v --tb=short

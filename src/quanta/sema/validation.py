@@ -9,6 +9,7 @@ from ..ast.nodes import (
     ForStmt, WhileStmt, IfStmt, ReturnStmt, ExprStmt,
     CallExpr, IndexExpr, SingleIndex, SliceIndex, SliceFull, BinaryExpr, UnaryExpr,
     VarExpr, LiteralExpr, FStringExpr, ListExpr, GroupExpr, AssignExpr,
+    NoiseModelDecl,
 )
 from ..errors import QuantaSemanticError, QuantaTypeError
 from ..types.tensor import TensorType, infer_shape, validate_shape
@@ -44,6 +45,7 @@ class SemanticAnalyzer:
         self.gates: Dict[str, GateDecl] = {}
         self.constants: Dict[str, ConstDecl] = {}
         self.tensor_shapes: Dict[str, tuple] = {}
+        self.noise_model = None
         # Built-in constants
         import math
         self.builtin_constants = {
@@ -63,6 +65,7 @@ class SemanticAnalyzer:
             "error",
             "warn",
             "Print",
+            "Analyze",
         }
     
     def analyze(self, ast: Program, keep_structure: bool = False):
@@ -99,6 +102,8 @@ class SemanticAnalyzer:
                 self.symbols[stmt.name] = Symbol(stmt.name, tensor_type.format(), stmt.value)
                 if tensor_type.shape():
                     self.tensor_shapes[stmt.name] = tensor_type.shape()
+            elif isinstance(stmt, NoiseModelDecl):
+                self.noise_model = stmt
         
         # Second pass: validate statements
         for stmt in ast.statements:
@@ -138,6 +143,8 @@ class SemanticAnalyzer:
         elif isinstance(stmt, ReturnStmt):
             if stmt.value:
                 self._validate_expression(stmt.value)
+        elif isinstance(stmt, NoiseModelDecl):
+            pass
     
     def _validate_function(self, func: FuncDecl):
         """Validate function declaration"""

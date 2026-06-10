@@ -35,4 +35,5 @@ __all__ = [
     "ListExpr",
     "GroupExpr",
     "AssignExpr",
+    "NoiseModelDecl",
 ]

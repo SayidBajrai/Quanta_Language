@@ -3,7 +3,7 @@ AST node definitions for Quanta language
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional, Any, TYPE_CHECKING
+from typing import List, Optional, Any, Dict, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..types.tensor import TensorType
@@ -382,3 +382,10 @@ class AssignExpr(Expr):
     def __init__(self, name: str, value: Expr):
         self.name = name
         self.value = value
+
+
+class NoiseModelDecl(Stmt):
+    """Noise model declaration: NoiseModel { depolarizing = 0.01, readout = 0.03 }"""
+
+    def __init__(self, params: Dict[str, float]):
+        self.params = params
